@@ -32,20 +32,7 @@ jobs:
                   path: kernel
                   fetch-depth: 1
 
-            # ============ 2. 释放磁盘空间 ============
-            - name: Free disk space
-              run: |
-                  echo "===== Disk space before cleanup ====="
-                  df -h
-                  sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                              /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-                  sudo apt-get clean
-                  echo "===== Disk space after cleanup ====="
-                  df -h
-                  echo "===== Memory info ====="
-                  free -h
-
-            # ============ 3. 安装编译依赖 ============
+            # ============ 2. 安装编译依赖 ============
             - name: Install build dependencies
               run: |
                   sudo apt-get update
@@ -54,22 +41,22 @@ jobs:
                     imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
                     libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
                     libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-                    squashfs-tools xsltproc zip zlib1g-dev \
+                    squashfs-tools xsltproc zip zlib1g-dev device-tree-compiler \
                     python3 python-is-python3 libncurses5-dev libncursesw5-dev
                   sudo apt-get install -y libncurses5 libtinfo5 || true
 
-            # ============ 4. ccache 缓存 ============
+            # ============ 3. ccache 缓存 ============
             - name: Setup ccache
               uses: hendrikmuhs/ccache-action@v1.2
               with:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 5. 下载工具链 ============
+            # ============ 4. 下载工具链 ============
             - name: Clone toolchains
               shell: bash
               run: |
-                  # --- Clang：LineageOS 内核专用预编译 clang-r416183b ---
+                  # --- Clang：LineageOS 内核专用 clang-r416183b ---
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
                     /tmp/clang
@@ -86,7 +73,7 @@ jobs:
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # --- 符号链接 ---
+                  # --- 创建不带版本号的符号链接 ---
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
                     [ -e "$f" ] || continue
@@ -101,15 +88,13 @@ jobs:
                     ln -sf "$f" "$newname"
                   done
 
-                  # --- 验证 ---
                   echo "===== Toolchain check ====="
                   /tmp/clang/bin/clang --version || true
-                  ls -l /tmp/gcc64/bin/aarch64-linux-android-gcc || true
-                  ls -l /tmp/gcc64/bin/aarch64-linux-android-ld  || true
-                  ls -l /tmp/gcc32/bin/arm-linux-androideabi-gcc || true
-                  ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld  || true
+                  /usr/bin/dtc --version || true
+                  ls -l /tmp/gcc64/bin/aarch64-linux-android-ld || true
+                  ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld || true
 
-            # ============ 6. 配置 + 注入容器支持 ============
+            # ============ 5. 配置 + 注入容器支持 ============
             - name: Configure kernel with container support
               working-directory: ./kernel
               run: |
@@ -124,15 +109,19 @@ jobs:
 
                   CFG="out/.config"
 
+                  # 防御性：禁用 DWARF v5 默认选项
                   ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
+                  # Namespaces
                   ./scripts/config --file $CFG \
                     -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
 
+                  # Cgroups
                   ./scripts/config --file $CFG \
                     -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
                     -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
 
+                  # 网络
                   ./scripts/config --file $CFG \
                     -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
                     -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
@@ -140,8 +129,10 @@ jobs:
                     -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
                     -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
 
+                  # OverlayFS
                   ./scripts/config --file $CFG -e OVERLAY_FS
 
+                  # 模块
                   ./scripts/config --file $CFG \
                     -m NETFILTER_XT_MATCH_ADDRTYPE \
                     -m NETFILTER_XT_MATCH_CONNTRACK \
@@ -152,10 +143,20 @@ jobs:
                   echo "===== Container-related config check ====="
                   grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
                     out/.config || true
-                  echo "===== DWARF config check ====="
-                  grep -E "CONFIG_DEBUG_INFO_DWARF" out/.config || true
 
-            # ============ 7. 编译内核（带诊断） ============
+            # ============ 6. 禁用 DTBO overlay 编译 ============
+            - name: Disable DTBO overlay compilation
+              working-directory: ./kernel
+              run: |
+                  # LGE 的 dtsi 用了内核自带 DTC 不支持的语法，跳过所有 dtbo overlay
+                  # 主 dtb 已内嵌进 Image.gz-dtb，overlay 不是必须的
+                  find arch/arm64/boot/dts -name Makefile -print0 | \
+                    xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
+
+                  echo "===== Verify dtbo lines disabled ====="
+                  grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -5 || true
+
+            # ============ 7. 编译内核 ============
             - name: Build kernel
               working-directory: ./kernel
               run: |
@@ -165,57 +166,20 @@ jobs:
                   export CROSS_COMPILE=aarch64-linux-android-
                   export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-                  echo "===== Disk space before build ====="
-                  df -h
-
-                  set +e
                   make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
                     CC=clang \
                     CLANG_TRIPLE=aarch64-linux-gnu- \
                     CROSS_COMPILE=aarch64-linux-android- \
                     CROSS_COMPILE_ARM32=arm-linux-androideabi- \
                     2>&1 | tee build.log
-                  BUILD_STATUS=${PIPESTATUS[0]}
-                  set -e
 
-                  if [ "$BUILD_STATUS" -ne 0 ]; then
-                    echo ""
-                    echo "=================================================="
-                    echo "===== BUILD FAILED - Diagnostic Information ====="
-                    echo "=================================================="
-
-                    echo ""
-                    echo "----- Last 100 lines of build.log -----"
-                    tail -100 build.log
-
-                    echo ""
-                    echo "----- Searching for 'Error 1' -----"
-                    grep -n "Error 1" build.log | tail -20 || true
-
-                    echo ""
-                    echo "----- Searching for 'undefined reference' -----"
-                    grep -n "undefined reference" build.log | head -20 || true
-
-                    echo ""
-                    echo "----- Searching for 'ld:' errors -----"
-                    grep -n "ld:" build.log | tail -20 || true
-
-                    echo ""
-                    echo "----- Searching for 'No space left' -----"
-                    grep -n "No space left" build.log | head -10 || true
-
-                    echo ""
-                    echo "----- Searching for 'cannot find' -----"
-                    grep -n "cannot find" build.log | head -20 || true
-
-                    echo ""
-                    echo "===== Disk space after failed build ====="
-                    df -h
-
+                  if [ ${PIPESTATUS[0]} -ne 0 ]; then
+                    echo "===== Build failed, last 80 lines ====="
+                    tail -80 build.log
                     exit 1
                   fi
 
-            # ============ 8. 上传构建日志（无论成功失败） ============
+            # ============ 8. 上传构建日志 ============
             - name: Upload build log
               if: always()
               uses: actions/upload-artifact@v4
@@ -224,7 +188,7 @@ jobs:
                   path: kernel/build.log
                   retention-days: 7
 
-            # ============ 9. 打包成 AnyKernel3 刷机包 ============
+            # ============ 9. 打包成 AnyKernel3 ============
             - name: Package with AnyKernel3
               if: success()
               run: |
@@ -233,9 +197,10 @@ jobs:
 
                   cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz-dtb .
 
-                  if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
-                    cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
-                  fi
+                  # dtbo 被禁用了，所以不再拷贝 dtbo.img，避免刷入不匹配的 overlay
+                  # if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
+                  #   cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
+                  # fi
 
                   rm -rf .git
                   zip -r9 kernel-flashlmdd-container.zip . -x "*.git*"
