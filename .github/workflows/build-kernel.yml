@@ -16,8 +16,6 @@ env:
     KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
     ARCH: arm64
     SUBARCH: arm64
-    GCC64_VERSION: "master"
-    GCC32_VERSION: "master"
 
 jobs:
     build:
@@ -54,11 +52,11 @@ jobs:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 4. 下载工具链并创建符号链接 ============
+            # ============ 4. 下载工具链 ============
             - name: Clone toolchains
               shell: bash
               run: |
-                  # --- Clang：WeebX Clang ---
+                  # --- Clang：WeebX Clang（已验证可用） ---
                   mkdir -p /tmp/clang
                   curl -L --retry 3 --retry-delay 5 -o /tmp/weebx-clang.tar.gz \
                     https://github.com/XSans0/WeebX-Clang/releases/download/WeebX-Clang-19.1.5-release/WeebX-Clang-19.1.5.tar.gz
@@ -66,18 +64,28 @@ jobs:
                   tar -xzf /tmp/weebx-clang.tar.gz -C /tmp/clang --strip-components=1
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  # --- GCC 4.9：AOSP 预编译 ---
+                  # --- GCC 4.9：改用 LineageOS 官方 GitHub 镜像 ---
                   git clone --depth=1 \
-                    https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-                    -b ${{ env.GCC64_VERSION }} /tmp/gcc64
+                    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+                    /tmp/gcc64
                   echo "/tmp/gcc64/bin" >> $GITHUB_PATH
 
                   git clone --depth=1 \
-                    https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
-                    -b ${{ env.GCC32_VERSION }} /tmp/gcc32
+                    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+                    /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # --- 关键：为 GCC 创建不带版本号的符号链接 ---
+                  # --- 调试：打印目录结构 ---
+                  echo "===== /tmp/gcc64 top-level ====="
+                  ls /tmp/gcc64
+                  echo "===== /tmp/gcc64/bin (first 20) ====="
+                  ls /tmp/gcc64/bin | head -20 || echo "bin/ NOT FOUND"
+                  echo "===== /tmp/gcc32 top-level ====="
+                  ls /tmp/gcc32
+                  echo "===== /tmp/gcc32/bin (first 20) ====="
+                  ls /tmp/gcc32/bin | head -20 || echo "bin/ NOT FOUND"
+
+                  # --- 创建不带版本号的符号链接 ---
                   echo "===== Creating symlinks for GCC 64-bit ====="
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
