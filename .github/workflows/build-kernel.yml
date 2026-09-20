@@ -27,7 +27,7 @@ jobs:
         timeout-minutes: 180
 
         steps:
-            # ============ 1. 拉取本仓库，获取 prebuilt/boot.img ============
+            # ============ 1. 拉取本仓库（含 prebuilt/boot.img） ============
             - name: Checkout this repo
               uses: actions/checkout@v4
               with:
@@ -44,6 +44,7 @@ jobs:
                   fi
                   echo "===== Original boot.img ====="
                   ls -lh "$BOOT"
+                  file "$BOOT" || true
 
             # ============ 2. 拉取内核源码 ============
             - name: Checkout kernel source
@@ -197,13 +198,23 @@ jobs:
                   echo "===== New kernel image ====="
                   ls -lh out/arch/arm64/boot/Image.gz
 
-            # ============ 9. 下载 mkbootimg_tools ============
-            - name: Fetch mkbootimg_tools
+            # ============ 9. 编译 mkbootimg_tools ============
+            - name: Fetch and build mkbootimg_tools
               run: |
-                  git clone --depth=1 https://github.com/xiaolu/mkbootimg_tools /tmp/mkbootimg_tools
-                  chmod +x /tmp/mkbootimg_tools/unpackbootimg /tmp/mkbootimg_tools/mkbootimg
-                  echo "===== mkbootimg_tools ready ====="
-                  ls -la /tmp/mkbootimg_tools
+                  git clone --depth=1 \
+                    https://github.com/opensourcefuture/android-unpackbootimg \
+                    /tmp/mkbootimg_tools
+                  cd /tmp/mkbootimg_tools
+                  make
+
+                  echo "===== mkbootimg_tools built ====="
+                  ls -la /tmp/mkbootimg_tools/
+                  file /tmp/mkbootimg_tools/unpackbootimg || true
+                  file /tmp/mkbootimg_tools/mkbootimg || true
+
+                  echo "===== Tool help ====="
+                  /tmp/mkbootimg_tools/unpackbootimg 2>&1 | head -10 || true
+                  /tmp/mkbootimg_tools/mkbootimg 2>&1 | head -10 || true
 
             # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 ============
             - name: Repack boot.img with new kernel
@@ -214,14 +225,15 @@ jobs:
                   BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
                   KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
                   WORK="/tmp/boot-work"
+                  TOOLS="/tmp/mkbootimg_tools"
 
                   rm -rf "$WORK"
                   mkdir -p "$WORK"
 
                   echo "======================================"
-                  echo "===== Step 1: Unpack boot.img  ====="
+                  echo "===== Step 1: Unpack boot.img ====="
                   echo "======================================"
-                  /tmp/mkbootimg_tools/unpackbootimg -i "$BOOT_SRC" -o "$WORK/"
+                  "$TOOLS/unpackbootimg" -i "$BOOT_SRC" -o "$WORK/"
                   echo "===== Unpacked files ====="
                   ls -la "$WORK/"
 
@@ -230,14 +242,14 @@ jobs:
                   echo "======================================"
                   echo "===== Step 2: Read original params ====="
                   echo "======================================"
-                  BASE=$(cat boot.img-base 2>/dev/null || echo "0x00000000")
-                  PAGESIZE=$(cat boot.img-pagesize 2>/dev/null || echo "4096")
-                  KERNELOFF=$(cat boot.img-kerneloff 2>/dev/null || echo "0x00008000")
-                  RAMDISKOFF=$(cat boot.img-ramdiskoff 2>/dev/null || echo "0x01000000")
-                  TAGSOFF=$(cat boot.img-tagsoff 2>/dev/null || echo "0x00000100")
-                  DTBOFF=$(cat boot.img-dtboff 2>/dev/null || echo "0x01f00000")
-                  CMDLINE=$(cat boot.img-cmdline 2>/dev/null || echo "")
-                  BOARD=$(cat boot.img-board 2>/dev/null || echo "")
+                  BASE=$(cat boot.img-base 2>/dev/null | tr -d '\0' || echo "0x00000000")
+                  PAGESIZE=$(cat boot.img-pagesize 2>/dev/null | tr -d '\0' || echo "4096")
+                  KERNELOFF=$(cat boot.img-kerneloff 2>/dev/null | tr -d '\0' || echo "0x00008000")
+                  RAMDISKOFF=$(cat boot.img-ramdiskoff 2>/dev/null | tr -d '\0' || echo "0x01000000")
+                  TAGSOFF=$(cat boot.img-tagsoff 2>/dev/null | tr -d '\0' || echo "0x00000100")
+                  DTBOFF=$(cat boot.img-dtboff 2>/dev/null | tr -d '\0' || echo "0x01f00000")
+                  CMDLINE=$(cat boot.img-cmdline 2>/dev/null | tr -d '\0' || echo "")
+                  BOARD=$(cat boot.img-board 2>/dev/null | tr -d '\0' || echo "")
 
                   echo "BASE=$BASE"
                   echo "PAGESIZE=$PAGESIZE"
@@ -271,17 +283,21 @@ jobs:
                     ARGS+=(--ramdisk "$WORK/boot.img-ramdisk.gz")
                   elif [ -f "$WORK/boot.img-ramdisk" ]; then
                     ARGS+=(--ramdisk "$WORK/boot.img-ramdisk")
+                  elif [ -f "$WORK/ramdisk.gz" ]; then
+                    ARGS+=(--ramdisk "$WORK/ramdisk.gz")
                   else
                     echo "::error::ramdisk not found in unpacked output"
                     ls -la "$WORK/"
                     exit 1
                   fi
 
-                  # DTB
+                  # DTB (不同版本命名可能不同)
                   if [ -f "$WORK/boot.img-dt" ]; then
                     ARGS+=(--dtb "$WORK/boot.img-dt" --dtb_offset "$DTBOFF")
                   elif [ -f "$WORK/boot.img-dtb" ]; then
                     ARGS+=(--dtb "$WORK/boot.img-dtb" --dtb_offset "$DTBOFF")
+                  elif [ -f "$WORK/dtb" ]; then
+                    ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTBOFF")
                   fi
 
                   # Cmdline
@@ -300,7 +316,7 @@ jobs:
                   echo "======================================"
                   echo "===== Step 5: Repack boot.img ====="
                   echo "======================================"
-                  /tmp/mkbootimg_tools/mkbootimg "${ARGS[@]}" -o "$BOOT_OUT"
+                  "$TOOLS/mkbootimg" "${ARGS[@]}" -o "$BOOT_OUT"
 
                   echo "======================================"
                   echo "===== Step 6: Verify output ====="
@@ -308,8 +324,9 @@ jobs:
                   ls -lh "$BOOT_OUT"
                   file "$BOOT_OUT" || true
 
-            # ============ 11. 上传新的 boot.img ============
+            # ============ 11. 上传新 boot.img ============
             - name: Upload new boot.img
+              if: success()
               uses: actions/upload-artifact@v4
               with:
                   name: boot-flashlmdd-container-${{ github.run_number }}
