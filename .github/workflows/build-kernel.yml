@@ -1,4 +1,4 @@
-name: Build Container-Supported Kernel (LG G8)
+name: Build Container-Supported Kernel (LG G8) + boot.img Repack
 
 on:
     workflow_dispatch:
@@ -11,6 +11,10 @@ on:
                 description: "Path to defconfig (relative to kernel root)"
                 required: true
                 default: "vendor/lineageos_flash_defconfig"
+            boot_img_path:
+                description: "Path to prebuilt boot.img in this repo"
+                required: true
+                default: "prebuilt/boot.img"
 
 env:
     KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
@@ -23,7 +27,25 @@ jobs:
         timeout-minutes: 180
 
         steps:
-            # ============ 1. 拉取内核源码 ============
+            # ============ 1. 拉取本仓库，获取 prebuilt/boot.img ============
+            - name: Checkout this repo
+              uses: actions/checkout@v4
+              with:
+                  path: builder
+
+            - name: Verify boot.img exists
+              run: |
+                  BOOT="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
+                  if [ ! -f "$BOOT" ]; then
+                    echo "::error::boot.img not found at $BOOT"
+                    echo "Contents of repo:"
+                    ls -laR ${{ github.workspace }}/builder/ | head -50
+                    exit 1
+                  fi
+                  echo "===== Original boot.img ====="
+                  ls -lh "$BOOT"
+
+            # ============ 2. 拉取内核源码 ============
             - name: Checkout kernel source
               uses: actions/checkout@v4
               with:
@@ -32,7 +54,7 @@ jobs:
                   path: kernel
                   fetch-depth: 1
 
-            # ============ 2. 安装编译依赖 ============
+            # ============ 3. 安装编译依赖 ============
             - name: Install build dependencies
               run: |
                   sudo apt-get update
@@ -41,61 +63,58 @@ jobs:
                     imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
                     libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
                     libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-                    squashfs-tools xsltproc zip zlib1g-dev device-tree-compiler \
+                    squashfs-tools xsltproc zip zlib1g-dev unzip \
                     python3 python-is-python3 libncurses5-dev libncursesw5-dev
                   sudo apt-get install -y libncurses5 libtinfo5 || true
 
-            # ============ 3. ccache 缓存 ============
+            # ============ 4. ccache 缓存 ============
             - name: Setup ccache
               uses: hendrikmuhs/ccache-action@v1.2
               with:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 4. 下载工具链 ============
+            # ============ 5. 下载工具链 ============
             - name: Clone toolchains
               shell: bash
               run: |
-                  # --- Clang：LineageOS 内核专用 clang-r416183b ---
+                  # Clang：LineageOS 内核专用
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
                     /tmp/clang
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  # --- GCC 4.9 ---
+                  # GCC 4.9 aarch64
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
                     /tmp/gcc64
                   echo "/tmp/gcc64/bin" >> $GITHUB_PATH
 
+                  # GCC 4.9 arm
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # --- 创建不带版本号的符号链接 ---
+                  # 符号链接
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
                     [ -e "$f" ] || continue
-                    newname="${f/aarch64-linux-android-4.9-/aarch64-linux-android-}"
-                    ln -sf "$f" "$newname"
+                    ln -sf "$f" "${f/aarch64-linux-android-4.9-/aarch64-linux-android-}"
                   done
-
                   cd /tmp/gcc32/bin
                   for f in arm-linux-androideabi-4.9-*; do
                     [ -e "$f" ] || continue
-                    newname="${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
-                    ln -sf "$f" "$newname"
+                    ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
                   done
 
                   echo "===== Toolchain check ====="
                   /tmp/clang/bin/clang --version || true
-                  /usr/bin/dtc --version || true
                   ls -l /tmp/gcc64/bin/aarch64-linux-android-ld || true
                   ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld || true
 
-            # ============ 5. 配置 + 注入容器支持 ============
-            - name: Configure kernel with container support
+            # ============ 6. 配置内核 + 注入容器支持 ============
+            - name: Configure kernel
               working-directory: ./kernel
               run: |
                   export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
@@ -109,7 +128,7 @@ jobs:
 
                   CFG="out/.config"
 
-                  # 防御性：禁用 DWARF v5 默认选项
+                  # 防御性：禁用 DWARF v5
                   ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
                   # Namespaces
@@ -140,23 +159,19 @@ jobs:
 
                   make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
-                  echo "===== Container-related config check ====="
+                  echo "===== Container config check ====="
                   grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
                     out/.config || true
 
-            # ============ 6. 禁用 DTBO overlay 编译 ============
+            # ============ 7. 禁用 DTBO overlay 编译 ============
             - name: Disable DTBO overlay compilation
               working-directory: ./kernel
               run: |
-                  # LGE 的 dtsi 用了内核自带 DTC 不支持的语法，跳过所有 dtbo overlay
-                  # 主 dtb 已内嵌进 Image.gz-dtb，overlay 不是必须的
                   find arch/arm64/boot/dts -name Makefile -print0 | \
                     xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
+                  grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-                  echo "===== Verify dtbo lines disabled ====="
-                  grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -5 || true
-
-            # ============ 7. 编译内核 ============
+            # ============ 8. 编译内核 ============
             - name: Build kernel
               working-directory: ./kernel
               run: |
@@ -174,42 +189,138 @@ jobs:
                     2>&1 | tee build.log
 
                   if [ ${PIPESTATUS[0]} -ne 0 ]; then
-                    echo "===== Build failed, last 80 lines ====="
-                    tail -80 build.log
+                    echo "===== Build failed ====="
+                    tail -100 build.log
                     exit 1
                   fi
 
-            # ============ 8. 上传构建日志 ============
+                  echo "===== New kernel image ====="
+                  ls -lh out/arch/arm64/boot/Image.gz
+
+            # ============ 9. 下载 mkbootimg_tools ============
+            - name: Fetch mkbootimg_tools
+              run: |
+                  git clone --depth=1 https://github.com/xiaolu/mkbootimg_tools /tmp/mkbootimg_tools
+                  chmod +x /tmp/mkbootimg_tools/unpackbootimg /tmp/mkbootimg_tools/mkbootimg
+                  echo "===== mkbootimg_tools ready ====="
+                  ls -la /tmp/mkbootimg_tools
+
+            # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 ============
+            - name: Repack boot.img with new kernel
+              shell: bash
+              run: |
+                  set -e
+                  BOOT_SRC="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
+                  BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
+                  KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
+                  WORK="/tmp/boot-work"
+
+                  rm -rf "$WORK"
+                  mkdir -p "$WORK"
+
+                  echo "======================================"
+                  echo "===== Step 1: Unpack boot.img  ====="
+                  echo "======================================"
+                  /tmp/mkbootimg_tools/unpackbootimg -i "$BOOT_SRC" -o "$WORK/"
+                  echo "===== Unpacked files ====="
+                  ls -la "$WORK/"
+
+                  cd "$WORK"
+
+                  echo "======================================"
+                  echo "===== Step 2: Read original params ====="
+                  echo "======================================"
+                  BASE=$(cat boot.img-base 2>/dev/null || echo "0x00000000")
+                  PAGESIZE=$(cat boot.img-pagesize 2>/dev/null || echo "4096")
+                  KERNELOFF=$(cat boot.img-kerneloff 2>/dev/null || echo "0x00008000")
+                  RAMDISKOFF=$(cat boot.img-ramdiskoff 2>/dev/null || echo "0x01000000")
+                  TAGSOFF=$(cat boot.img-tagsoff 2>/dev/null || echo "0x00000100")
+                  DTBOFF=$(cat boot.img-dtboff 2>/dev/null || echo "0x01f00000")
+                  CMDLINE=$(cat boot.img-cmdline 2>/dev/null || echo "")
+                  BOARD=$(cat boot.img-board 2>/dev/null || echo "")
+
+                  echo "BASE=$BASE"
+                  echo "PAGESIZE=$PAGESIZE"
+                  echo "KERNELOFF=$KERNELOFF"
+                  echo "RAMDISKOFF=$RAMDISKOFF"
+                  echo "TAGSOFF=$TAGSOFF"
+                  echo "DTBOFF=$DTBOFF"
+                  echo "CMDLINE=$CMDLINE"
+                  echo "BOARD=$BOARD"
+
+                  echo "======================================"
+                  echo "===== Step 3: Replace kernel ====="
+                  echo "======================================"
+                  cp "$KERNEL_NEW" "$WORK/boot.img-kernel"
+                  ls -lh "$WORK/boot.img-kernel"
+
+                  echo "======================================"
+                  echo "===== Step 4: Build mkbootimg args ====="
+                  echo "======================================"
+                  ARGS=(
+                    --kernel "$WORK/boot.img-kernel"
+                    --base "$BASE"
+                    --pagesize "$PAGESIZE"
+                    --kernel_offset "$KERNELOFF"
+                    --ramdisk_offset "$RAMDISKOFF"
+                    --tags_offset "$TAGSOFF"
+                  )
+
+                  # Ramdisk
+                  if [ -f "$WORK/boot.img-ramdisk.gz" ]; then
+                    ARGS+=(--ramdisk "$WORK/boot.img-ramdisk.gz")
+                  elif [ -f "$WORK/boot.img-ramdisk" ]; then
+                    ARGS+=(--ramdisk "$WORK/boot.img-ramdisk")
+                  else
+                    echo "::error::ramdisk not found in unpacked output"
+                    ls -la "$WORK/"
+                    exit 1
+                  fi
+
+                  # DTB
+                  if [ -f "$WORK/boot.img-dt" ]; then
+                    ARGS+=(--dtb "$WORK/boot.img-dt" --dtb_offset "$DTBOFF")
+                  elif [ -f "$WORK/boot.img-dtb" ]; then
+                    ARGS+=(--dtb "$WORK/boot.img-dtb" --dtb_offset "$DTBOFF")
+                  fi
+
+                  # Cmdline
+                  if [ -n "$CMDLINE" ]; then
+                    ARGS+=(--cmdline "$CMDLINE")
+                  fi
+
+                  # Board
+                  if [ -n "$BOARD" ]; then
+                    ARGS+=(--board "$BOARD")
+                  fi
+
+                  echo "===== ARGS ====="
+                  printf '%s\n' "${ARGS[@]}"
+
+                  echo "======================================"
+                  echo "===== Step 5: Repack boot.img ====="
+                  echo "======================================"
+                  /tmp/mkbootimg_tools/mkbootimg "${ARGS[@]}" -o "$BOOT_OUT"
+
+                  echo "======================================"
+                  echo "===== Step 6: Verify output ====="
+                  echo "======================================"
+                  ls -lh "$BOOT_OUT"
+                  file "$BOOT_OUT" || true
+
+            # ============ 11. 上传新的 boot.img ============
+            - name: Upload new boot.img
+              uses: actions/upload-artifact@v4
+              with:
+                  name: boot-flashlmdd-container-${{ github.run_number }}
+                  path: ${{ github.workspace }}/boot-flashlmdd-container.img
+                  retention-days: 7
+
+            # ============ 12. 上传编译日志 ============
             - name: Upload build log
               if: always()
               uses: actions/upload-artifact@v4
               with:
                   name: build-log-${{ github.run_number }}
                   path: kernel/build.log
-                  retention-days: 7
-
-            # ============ 9. 打包成 AnyKernel3 ============
-            - name: Package with AnyKernel3
-              if: success()
-              run: |
-                  git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
-                  cd /tmp/AnyKernel3
-
-                  cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz-dtb .
-
-                  # dtbo 被禁用了，所以不再拷贝 dtbo.img，避免刷入不匹配的 overlay
-                  # if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
-                  #   cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
-                  # fi
-
-                  rm -rf .git
-                  zip -r9 kernel-flashlmdd-container.zip . -x "*.git*"
-
-            # ============ 10. 上传刷机包 ============
-            - name: Upload kernel package
-              if: success()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: kernel-flashlmdd-container-${{ github.run_number }}
-                  path: /tmp/AnyKernel3/kernel-flashlmdd-container.zip
                   retention-days: 7
