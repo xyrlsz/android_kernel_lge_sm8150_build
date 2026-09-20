@@ -20,7 +20,7 @@ env:
 jobs:
     build:
         runs-on: ubuntu-22.04
-        timeout-minutes: 120
+        timeout-minutes: 180
 
         steps:
             # ============ 1. 拉取内核源码 ============
@@ -32,7 +32,20 @@ jobs:
                   path: kernel
                   fetch-depth: 1
 
-            # ============ 2. 安装编译依赖 ============
+            # ============ 2. 释放磁盘空间 ============
+            - name: Free disk space
+              run: |
+                  echo "===== Disk space before cleanup ====="
+                  df -h
+                  sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                              /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+                  sudo apt-get clean
+                  echo "===== Disk space after cleanup ====="
+                  df -h
+                  echo "===== Memory info ====="
+                  free -h
+
+            # ============ 3. 安装编译依赖 ============
             - name: Install build dependencies
               run: |
                   sudo apt-get update
@@ -45,14 +58,14 @@ jobs:
                     python3 python-is-python3 libncurses5-dev libncursesw5-dev
                   sudo apt-get install -y libncurses5 libtinfo5 || true
 
-            # ============ 3. ccache 缓存 ============
+            # ============ 4. ccache 缓存 ============
             - name: Setup ccache
               uses: hendrikmuhs/ccache-action@v1.2
               with:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 4. 下载工具链 ============
+            # ============ 5. 下载工具链 ============
             - name: Clone toolchains
               shell: bash
               run: |
@@ -62,7 +75,7 @@ jobs:
                     /tmp/clang
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  # --- GCC 4.9：LineageOS 官方 GitHub 镜像 ---
+                  # --- GCC 4.9 ---
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
                     /tmp/gcc64
@@ -73,8 +86,7 @@ jobs:
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # --- 创建不带版本号的符号链接 ---
-                  echo "===== Creating symlinks for GCC 64-bit ====="
+                  # --- 符号链接 ---
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
                     [ -e "$f" ] || continue
@@ -82,7 +94,6 @@ jobs:
                     ln -sf "$f" "$newname"
                   done
 
-                  echo "===== Creating symlinks for GCC 32-bit ====="
                   cd /tmp/gcc32/bin
                   for f in arm-linux-androideabi-4.9-*; do
                     [ -e "$f" ] || continue
@@ -90,7 +101,7 @@ jobs:
                     ln -sf "$f" "$newname"
                   done
 
-                  # --- 验证工具链 ---
+                  # --- 验证 ---
                   echo "===== Toolchain check ====="
                   /tmp/clang/bin/clang --version || true
                   ls -l /tmp/gcc64/bin/aarch64-linux-android-gcc || true
@@ -98,7 +109,7 @@ jobs:
                   ls -l /tmp/gcc32/bin/arm-linux-androideabi-gcc || true
                   ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld  || true
 
-            # ============ 5. 配置 + 注入容器支持 ============
+            # ============ 6. 配置 + 注入容器支持 ============
             - name: Configure kernel with container support
               working-directory: ./kernel
               run: |
@@ -108,72 +119,43 @@ jobs:
                   export CROSS_COMPILE=aarch64-linux-android-
                   export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-                  # --- 5.1 生成基础 .config ---
                   make O=out ARCH=arm64 SUBARCH=arm64 \
                     ${{ github.event.inputs.defconfig_path }}
 
-                  # --- 5.2 注入容器配置 ---
                   CFG="out/.config"
 
-                  # 防御性：禁用 DWARF v5 默认选项，使用 DWARF v4 更稳
-                  ./scripts/config --file $CFG \
-                    -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+                  ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
-                  # Namespaces（容器隔离的核心）
                   ./scripts/config --file $CFG \
-                    -e NAMESPACES \
-                    -e NET_NS \
-                    -e PID_NS \
-                    -e IPC_NS \
-                    -e UTS_NS \
-                    -e USER_NS
+                    -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
 
-                  # Control Groups（资源限制）
                   ./scripts/config --file $CFG \
-                    -e CGROUPS \
-                    -e CGROUP_DEVICE \
-                    -e CGROUP_HUGETLB \
-                    -e NET_CLS_CGROUP \
-                    -e CGROUP_FREEZER \
-                    -e CGROUP_SCHED \
-                    -e CPUSETS \
-                    -e MEMCG
+                    -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
+                    -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
 
-                  # 网络相关（容器间通信）
                   ./scripts/config --file $CFG \
-                    -e VETH \
-                    -e BRIDGE \
-                    -e BRIDGE_NETFILTER \
-                    -e NF_NAT \
-                    -e NETFILTER_XT_MATCH_ADDRTYPE \
-                    -e NETFILTER_XT_MATCH_CONNTRACK \
-                    -e NETFILTER_XT_MATCH_IPVS \
-                    -e NETFILTER_XT_MARK \
-                    -e NETFILTER_XT_NAT \
-                    -e NETFILTER_XT_TARGET_MASQUERADE \
-                    -e NETFILTER_XT_TARGET_REDIRECT \
-                    -e IP_VS
+                    -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
+                    -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
+                    -e NETFILTER_XT_MATCH_IPVS -e NETFILTER_XT_MARK \
+                    -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
+                    -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
 
-                  # OverlayFS（Docker overlay2 存储驱动）
                   ./scripts/config --file $CFG -e OVERLAY_FS
 
-                  # 部分网络过滤项作为模块编译更稳妥
                   ./scripts/config --file $CFG \
                     -m NETFILTER_XT_MATCH_ADDRTYPE \
                     -m NETFILTER_XT_MATCH_CONNTRACK \
                     -m NETFILTER_XT_MATCH_IPVS
 
-                  # --- 5.3 自动处理 Kconfig 依赖 ---
                   make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
-                  # --- 5.4 验证 ---
                   echo "===== Container-related config check ====="
                   grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
                     out/.config || true
                   echo "===== DWARF config check ====="
                   grep -E "CONFIG_DEBUG_INFO_DWARF" out/.config || true
 
-            # ============ 6. 编译内核 ============
+            # ============ 7. 编译内核（带诊断） ============
             - name: Build kernel
               working-directory: ./kernel
               run: |
@@ -183,14 +165,68 @@ jobs:
                   export CROSS_COMPILE=aarch64-linux-android-
                   export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
+                  echo "===== Disk space before build ====="
+                  df -h
+
+                  set +e
                   make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
                     CC=clang \
                     CLANG_TRIPLE=aarch64-linux-gnu- \
                     CROSS_COMPILE=aarch64-linux-android- \
-                    CROSS_COMPILE_ARM32=arm-linux-androideabi-
+                    CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+                    2>&1 | tee build.log
+                  BUILD_STATUS=${PIPESTATUS[0]}
+                  set -e
 
-            # ============ 7. 打包成 AnyKernel3 刷机包 ============
+                  if [ "$BUILD_STATUS" -ne 0 ]; then
+                    echo ""
+                    echo "=================================================="
+                    echo "===== BUILD FAILED - Diagnostic Information ====="
+                    echo "=================================================="
+
+                    echo ""
+                    echo "----- Last 100 lines of build.log -----"
+                    tail -100 build.log
+
+                    echo ""
+                    echo "----- Searching for 'Error 1' -----"
+                    grep -n "Error 1" build.log | tail -20 || true
+
+                    echo ""
+                    echo "----- Searching for 'undefined reference' -----"
+                    grep -n "undefined reference" build.log | head -20 || true
+
+                    echo ""
+                    echo "----- Searching for 'ld:' errors -----"
+                    grep -n "ld:" build.log | tail -20 || true
+
+                    echo ""
+                    echo "----- Searching for 'No space left' -----"
+                    grep -n "No space left" build.log | head -10 || true
+
+                    echo ""
+                    echo "----- Searching for 'cannot find' -----"
+                    grep -n "cannot find" build.log | head -20 || true
+
+                    echo ""
+                    echo "===== Disk space after failed build ====="
+                    df -h
+
+                    exit 1
+                  fi
+
+            # ============ 8. 上传构建日志（无论成功失败） ============
+            - name: Upload build log
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: build-log-${{ github.run_number }}
+                  path: kernel/build.log
+                  retention-days: 7
+
+            # ============ 9. 打包成 AnyKernel3 刷机包 ============
             - name: Package with AnyKernel3
+              if: success()
               run: |
                   git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
                   cd /tmp/AnyKernel3
@@ -204,8 +240,9 @@ jobs:
                   rm -rf .git
                   zip -r9 kernel-flashlmdd-container.zip . -x "*.git*"
 
-            # ============ 8. 上传产物 ============
+            # ============ 10. 上传刷机包 ============
             - name: Upload kernel package
+              if: success()
               uses: actions/upload-artifact@v4
               with:
                   name: kernel-flashlmdd-container-${{ github.run_number }}
