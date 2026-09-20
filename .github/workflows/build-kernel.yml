@@ -11,11 +11,12 @@ on:
                 description: "Path to defconfig (relative to kernel root)"
                 required: true
                 default: "vendor/lineageos_flash_defconfig"
+
 env:
     KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
     ARCH: arm64
     SUBARCH: arm64
-    CLANG_VERSION: "r510928" # lineage-22.2 (Android 15) 推荐版本
+    CLANG_VERSION: "r510928" # 可改为 r536225 等
     GCC64_VERSION: "master"
     GCC32_VERSION: "master"
 
@@ -45,41 +46,45 @@ jobs:
                     libxml2 libxml2-utils lzop pngcrush rsync schedtool \
                     squashfs-tools xsltproc zip zlib1g-dev \
                     python3 python-is-python3 libncurses5-dev libncursesw5-dev
-                  # Ubuntu 22.04 需要额外安装旧版 libncurses/libtinfo
+                  # Ubuntu 22.04 可能需要旧版 libncurses/libtinfo
                   sudo apt-get install -y libncurses5 libtinfo5 || true
 
-            # ============ 3. ccache 缓存，加速二次编译 ============
+            # ============ 3. ccache 缓存 ============
             - name: Setup ccache
               uses: hendrikmuhs/ccache-action@v1.2
               with:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 4. 下载工具链 ============
+            # ============ 4. 下载工具链（已修正 Clang 克隆方式） ============
             - name: Clone toolchains
               run: |
-                  # AOSP Clang
+                  # AOSP Clang：克隆整个预编译仓库，不指定分支
                   git clone --depth=1 \
                     https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-                    -b ${{ env.CLANG_VERSION }} /tmp/clang
+                    /tmp/clang
+
+                  # 将指定版本的 Clang 加入 PATH（目录名为 clang-<版本>）
+                  echo "/tmp/clang/clang-${{ env.CLANG_VERSION }}/bin" >> $GITHUB_PATH
+
                   # AArch64 GCC 4.9
                   git clone --depth=1 \
                     https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
                     -b ${{ env.GCC64_VERSION }} /tmp/gcc64
+                  echo "/tmp/gcc64/bin" >> $GITHUB_PATH
+
                   # ARM GCC 4.9
                   git clone --depth=1 \
                     https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
                     -b ${{ env.GCC32_VERSION }} /tmp/gcc32
-
-                  echo "/tmp/clang/bin"     >> $GITHUB_PATH
-                  echo "/tmp/gcc64/bin"     >> $GITHUB_PATH
-                  echo "/tmp/gcc32/bin"     >> $GITHUB_PATH
+                  echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
             # ============ 5. 配置 + 注入容器支持 ============
             - name: Configure kernel with container support
               working-directory: ./kernel
               run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+                  # 手动设置 PATH（因为 GITHUB_PATH 在下一步才生效）
+                  export PATH="/tmp/clang/clang-${{ env.CLANG_VERSION }}/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
                   export CC=clang
                   export CLANG_TRIPLE=aarch64-linux-gnu-
                   export CROSS_COMPILE=aarch64-linux-android-
@@ -90,7 +95,6 @@ jobs:
                     ${{ github.event.inputs.defconfig_path }}
 
                   # --- 5.2 用 scripts/config 注入容器相关配置 ---
-                  # 注意：这里只使用 --enable，不删除任何已有配置，避免破坏 defconfig
                   CFG="out/.config"
 
                   # Namespaces（容器隔离的核心）
@@ -131,14 +135,13 @@ jobs:
                   # OverlayFS（Docker overlay2 存储驱动）
                   ./scripts/config --file $CFG -e OVERLAY_FS
 
-                  # 部分配置项需要作为模块存在才能正确编译
+                  # 部分网络过滤项作为模块编译更稳妥
                   ./scripts/config --file $CFG \
                     -m NETFILTER_XT_MATCH_ADDRTYPE \
                     -m NETFILTER_XT_MATCH_CONNTRACK \
                     -m NETFILTER_XT_MATCH_IPVS
 
-                  # --- 5.3 让 make 自动处理依赖关系 ---
-                  # olddefconfig 会用默认值填补未定义的依赖，避免交互式询问
+                  # --- 5.3 自动处理 Kconfig 依赖 ---
                   make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
                   # --- 5.4 打印关键配置，验证是否生效 ---
@@ -150,7 +153,7 @@ jobs:
             - name: Build kernel
               working-directory: ./kernel
               run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+                  export PATH="/tmp/clang/clang-${{ env.CLANG_VERSION }}/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
                   export CC=clang
                   export CLANG_TRIPLE=aarch64-linux-gnu-
                   export CROSS_COMPILE=aarch64-linux-android-
@@ -162,7 +165,7 @@ jobs:
                     CROSS_COMPILE=aarch64-linux-android- \
                     CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-            # ============ 7. 打包成可刷入的 ZIP ============
+            # ============ 7. 打包成 AnyKernel3 刷机包 ============
             - name: Package with AnyKernel3
               run: |
                   git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
@@ -171,7 +174,7 @@ jobs:
                   # 拷贝内核产物
                   cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz-dtb .
 
-                  # 可选：拷贝 dtbo，如果设备需要
+                  # 可选：拷贝 dtbo（如果设备需要）
                   if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
                     cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
                   fi
