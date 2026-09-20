@@ -1,348 +1,473 @@
 name: Build Container-Supported Kernel (LG G8) + boot.img Repack
 
 on:
-    workflow_dispatch:
-        inputs:
-            kernel_branch:
-                description: "Kernel branch to build"
-                required: true
-                default: "lineage-22.2"
-            defconfig_path:
-                description: "Path to defconfig (relative to kernel root)"
-                required: true
-                default: "vendor/lineageos_flash_defconfig"
-            boot_img_path:
-                description: "Path to prebuilt boot.img in this repo"
-                required: true
-                default: "prebuilt/boot.img"
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "lineage-22.2"
+      defconfig_path:
+        description: "Path to defconfig (relative to kernel root)"
+        required: true
+        default: "vendor/lineageos_flash_defconfig"
+      boot_img_path:
+        description: "Path to prebuilt boot.img in this repo"
+        required: true
+        default: "prebuilt/boot.img"
 
 env:
-    KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
-    ARCH: arm64
-    SUBARCH: arm64
+  KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
+  ARCH: arm64
+  SUBARCH: arm64
 
 jobs:
-    build:
-        runs-on: ubuntu-22.04
-        timeout-minutes: 180
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
-        steps:
-            # ============ 1. 拉取本仓库（含 prebuilt/boot.img） ============
-            - name: Checkout this repo
-              uses: actions/checkout@v4
-              with:
-                  path: builder
+    steps:
+      # ============ 1. 拉取本仓库（含 prebuilt/boot.img） ============
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: builder
 
-            - name: Verify boot.img exists
-              run: |
-                  BOOT="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
-                  if [ ! -f "$BOOT" ]; then
-                    echo "::error::boot.img not found at $BOOT"
-                    ls -laR ${{ github.workspace }}/builder/ | head -50
-                    exit 1
-                  fi
-                  echo "===== Original boot.img ====="
-                  ls -lh "$BOOT"
-                  file "$BOOT" || true
+      - name: Verify boot.img exists
+        run: |
+          BOOT="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
+          if [ ! -f "$BOOT" ]; then
+            echo "::error::boot.img not found at $BOOT"
+            ls -laR ${{ github.workspace }}/builder/ | head -50
+            exit 1
+          fi
+          echo "===== Original boot.img ====="
+          ls -lh "$BOOT"
+          file "$BOOT" || true
 
-            # ============ 2. 拉取内核源码 ============
-            - name: Checkout kernel source
-              uses: actions/checkout@v4
-              with:
-                  repository: ${{ env.KERNEL_REPO }}
-                  ref: ${{ github.event.inputs.kernel_branch }}
-                  path: kernel
-                  fetch-depth: 1
+      # ============ 2. 拉取内核源码 ============
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ github.event.inputs.kernel_branch }}
+          path: kernel
+          fetch-depth: 1
 
-            # ============ 3. 安装编译依赖 ============
-            - name: Install build dependencies
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    bc bison build-essential ccache curl flex git gnupg gperf \
-                    imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
-                    libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
-                    libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-                    squashfs-tools xsltproc zip zlib1g-dev unzip \
-                    python3 python-is-python3 python3-pip \
-                    libncurses5-dev libncursesw5-dev
-                  sudo apt-get install -y libncurses5 libtinfo5 || true
+      # ============ 3. 安装编译依赖 ============
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git gnupg gperf \
+            imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
+            libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev unzip \
+            python3 python-is-python3 python3-pip \
+            libncurses5-dev libncursesw5-dev
+          sudo apt-get install -y libncurses5 libtinfo5 || true
 
-            # ============ 4. ccache 缓存 ============
-            - name: Setup ccache
-              uses: hendrikmuhs/ccache-action@v1.2
-              with:
-                  key: sm8150-${{ github.event.inputs.kernel_branch }}
-                  max-size: 2G
+      # ============ 4. ccache 缓存 ============
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: sm8150-${{ github.event.inputs.kernel_branch }}-clang
+          max-size: 5G
+          verbose: 1
 
-            # ============ 5. 下载工具链 ============
-            - name: Clone toolchains
-              shell: bash
-              run: |
-                  git clone --depth=1 \
-                    https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
-                    /tmp/clang
-                  echo "/tmp/clang/bin" >> $GITHUB_PATH
+      # ============ 4.5 创建 ccache shim 拦截 clang ============
+      - name: Setup ccache shim for clang
+        shell: bash
+        run: |
+          # 找到 ccache 二进制
+          CCACHE_BIN=$(which ccache)
+          echo "ccache binary: $CCACHE_BIN"
+          echo "ccache version: $(ccache --version | head -1)"
 
-                  git clone --depth=1 \
-                    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
-                    /tmp/gcc64
-                  echo "/tmp/gcc64/bin" >> $GITHUB_PATH
+          # 创建 shim 目录
+          mkdir -p /tmp/ccache-shim
+          ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang
+          ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang++
 
-                  git clone --depth=1 \
-                    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
-                    /tmp/gcc32
-                  echo "/tmp/gcc32/bin" >> $GITHUB_PATH
+          echo "===== ccache shim ====="
+          ls -la /tmp/ccache-shim/
 
-                  cd /tmp/gcc64/bin
-                  for f in aarch64-linux-android-4.9-*; do
-                    [ -e "$f" ] || continue
-                    ln -sf "$f" "${f/aarch64-linux-android-4.9-/aarch64-linux-android-}"
-                  done
-                  cd /tmp/gcc32/bin
-                  for f in arm-linux-androideabi-4.9-*; do
-                    [ -e "$f" ] || continue
-                    ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
-                  done
+          # 写入 ccache 环境变量（供后续所有步骤使用）
+          {
+            echo "CCACHE_MAXSIZE=5G"
+            echo "CCACHE_COMPRESS=true"
+            echo "CCACHE_COMPRESSLEVEL=6"
+            echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime"
+          } >> $GITHUB_ENV
 
-                  echo "===== Toolchain check ====="
-                  /tmp/clang/bin/clang --version || true
-                  ls -l /tmp/gcc64/bin/aarch64-linux-android-ld || true
-                  ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld || true
+          echo "===== Environment variables set ====="
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          echo "CCACHE_MAXSIZE=5G"
+          echo "CCACHE_COMPRESS=true"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
 
-            # ============ 6. 配置内核 + 注入容器支持 ============
-            - name: Configure kernel
-              working-directory: ./kernel
-              run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-                  export CC=clang
-                  export CLANG_TRIPLE=aarch64-linux-gnu-
-                  export CROSS_COMPILE=aarch64-linux-android-
-                  export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+      # ============ 5. 下载工具链 ============
+      - name: Clone toolchains
+        shell: bash
+        run: |
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
+            /tmp/clang
+          echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  make O=out ARCH=arm64 SUBARCH=arm64 \
-                    ${{ github.event.inputs.defconfig_path }}
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            /tmp/gcc64
+          echo "/tmp/gcc64/bin" >> $GITHUB_PATH
 
-                  CFG="out/.config"
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+            /tmp/gcc32
+          echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          cd /tmp/gcc64/bin
+          for f in aarch64-linux-android-4.9-*; do
+            [ -e "$f" ] || continue
+            ln -sf "$f" "${f/aarch64-linux-android-4.9-/aarch64-linux-android-}"
+          done
+          cd /tmp/gcc32/bin
+          for f in arm-linux-androideabi-4.9-*; do
+            [ -e "$f" ] || continue
+            ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
+          done
 
-                  ./scripts/config --file $CFG \
-                    -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
+          echo "===== Toolchain check ====="
+          /tmp/clang/bin/clang --version || true
+          ls -l /tmp/gcc64/bin/aarch64-linux-android-ld || true
+          ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld || true
 
-                  ./scripts/config --file $CFG \
-                    -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
-                    -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
+      # ============ 5.5 验证 ccache 拦截 clang ============
+      - name: Verify ccache intercepts clang
+        shell: bash
+        run: |
+          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
 
-                  ./scripts/config --file $CFG \
-                    -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
-                    -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
-                    -e NETFILTER_XT_MATCH_IPVS -e NETFILTER_XT_MARK \
-                    -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
-                    -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
+          echo "===== which clang ====="
+          which clang
+          echo "===== which ccache ====="
+          which ccache
 
-                  ./scripts/config --file $CFG -e OVERLAY_FS
+          echo "===== 测试 ccache 拦截 ====="
+          # 第一次调用（miss）
+          echo 'int main(){return 0;}' > /tmp/test.c
+          clang -c /tmp/test.c -o /tmp/test.o
+          echo "第一次编译完成"
 
-                  ./scripts/config --file $CFG \
-                    -m NETFILTER_XT_MATCH_ADDRTYPE \
-                    -m NETFILTER_XT_MATCH_CONNTRACK \
-                    -m NETFILTER_XT_MATCH_IPVS
+          # 第二次调用（hit）
+          clang -c /tmp/test.c -o /tmp/test.o
+          echo "第二次编译完成"
 
-                  make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
+          echo "===== ccache 统计（应该有 1 hit, 1 miss）====="
+          ccache -s
 
-                  echo "===== Container config check ====="
-                  grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
-                    out/.config || true
+      # ============ 6. 配置内核 + 注入容器支持 ============
+      - name: Configure kernel
+        working-directory: ./kernel
+        run: |
+          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-            # ============ 7. 禁用 DTBO overlay 编译 ============
-            - name: Disable DTBO overlay compilation
-              working-directory: ./kernel
-              run: |
-                  find arch/arm64/boot/dts -name Makefile -print0 | \
-                    xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
-                  grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
+          echo "===== ccache 环境 ====="
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          echo "CCACHE_BASEDIR=$CCACHE_BASEDIR"
+          ccache -s
 
-            # ============ 8. 编译内核 ============
-            - name: Build kernel
-              working-directory: ./kernel
-              run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-                  export CC=clang
-                  export CLANG_TRIPLE=aarch64-linux-gnu-
-                  export CROSS_COMPILE=aarch64-linux-android-
-                  export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          make O=out ARCH=arm64 SUBARCH=arm64 \
+            ${{ github.event.inputs.defconfig_path }}
 
-                  make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
-                    CC=clang \
-                    CLANG_TRIPLE=aarch64-linux-gnu- \
-                    CROSS_COMPILE=aarch64-linux-android- \
-                    CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-                    2>&1 | tee build.log
+          CFG="out/.config"
 
-                  if [ ${PIPESTATUS[0]} -ne 0 ]; then
-                    echo "===== Build failed ====="
-                    tail -100 build.log
-                    exit 1
-                  fi
+          ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
-                  echo "===== New kernel image ====="
-                  ls -lh out/arch/arm64/boot/Image.gz
+          ./scripts/config --file $CFG \
+            -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
 
-            # ============ 9. 下载 LineageOS 官方 mkbootimg 工具 ============
-            - name: Fetch LineageOS mkbootimg tools
-              run: |
-                  git clone --depth=1 -b lineage-22.2 \
-                    https://github.com/LineageOS/android_system_tools_mkbootimg \
-                    /tmp/lineage-mkbootimg
+          ./scripts/config --file $CFG \
+            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
+            -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
 
-                  echo "===== Available tools ====="
-                  ls -la /tmp/lineage-mkbootimg/*.py
+          ./scripts/config --file $CFG \
+            -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
+            -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
+            -e NETFILTER_XT_MATCH_IPVS -e NETFILTER_XT_MARK \
+            -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
+            -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
 
-                  echo "===== mkbootimg.py --help ====="
-                  python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -60 || true
+          ./scripts/config --file $CFG -e OVERLAY_FS
 
-            # ============ 10. 解包原 boot.img + 动态提取参数 + 重打包 ============
-            - name: Repack boot.img with new kernel
-              shell: bash
-              run: |
-                  set -e
-                  BOOT_SRC="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
-                  BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
-                  KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
-                  WORK="/tmp/boot-work"
-                  TOOLS="/tmp/lineage-mkbootimg"
+          ./scripts/config --file $CFG \
+            -m NETFILTER_XT_MATCH_ADDRTYPE \
+            -m NETFILTER_XT_MATCH_CONNTRACK \
+            -m NETFILTER_XT_MATCH_IPVS
 
-                  rm -rf "$WORK"
-                  mkdir -p "$WORK"
+          make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
-                  echo "======================================"
-                  echo "===== Step 1: Unpack boot.img ====="
-                  echo "======================================"
-                  UNPACK_OUT=$(python3 "$TOOLS/unpack_bootimg.py" \
-                    --boot_img "$BOOT_SRC" \
-                    --out "$WORK" 2>&1 | tee /dev/stderr)
+          echo "===== Container config check ====="
+          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
+            out/.config || true
 
-                  echo "===== Unpacked files ====="
-                  ls -la "$WORK/"
+      # ============ 7. 禁用 DTBO overlay 编译 ============
+      - name: Disable DTBO overlay compilation
+        working-directory: ./kernel
+        run: |
+          find arch/arm64/boot/dts -name Makefile -print0 | \
+            xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
+          grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-                  echo "======================================"
-                  echo "===== Step 2: Dynamically parse params ====="
-                  echo "======================================"
+      # ============ 8. 编译内核（ccache 加速） ============
+      - name: Build kernel
+        working-directory: ./kernel
+        run: |
+          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-                  # 从 unpack 输出里动态解析所有参数（不硬编码）
-                  HEADER_VERSION=$(echo "$UNPACK_OUT" | grep -i "boot image header version" | awk -F: '{print $2}' | tr -d ' ')
-                  KERNEL_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "kernel load address"        | awk -F: '{print $2}' | tr -d ' ')
-                  RAMDISK_OFFSET=$(echo "$UNPACK_OUT" | grep -i "ramdisk load address"       | awk -F: '{print $2}' | tr -d ' ')
-                  SECOND_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "second bootloader load address" | awk -F: '{print $2}' | tr -d ' ')
-                  TAGS_OFFSET=$(echo "$UNPACK_OUT"    | grep -i "kernel tags load address"   | awk -F: '{print $2}' | tr -d ' ')
-                  PAGESIZE=$(echo "$UNPACK_OUT"       | grep -i "^page size"                 | awk -F: '{print $2}' | tr -d ' ')
-                  OS_VERSION=$(echo "$UNPACK_OUT"     | grep -i "^os version"                | awk -F: '{print $2}' | tr -d ' ')
-                  OS_PATCH_LEVEL=$(echo "$UNPACK_OUT" | grep -i "^os patch level"            | awk -F: '{print $2}' | tr -d ' ')
-                  CMDLINE=$(echo "$UNPACK_OUT"        | grep -i "^command line args"         | sed 's/^[^:]*: *//')
-                  DTB_OFFSET=$(echo "$UNPACK_OUT"     | grep -i "^dtb address"               | awk -F: '{print $2}' | tr -d ' ')
-                  PRODUCT_NAME=$(echo "$UNPACK_OUT"   | grep -i "^product name"              | awk -F: '{print $2}' | sed 's/^ *//')
+          echo "===== Build 开始 ====="
+          echo "时间: $(date)"
+          echo "ccache 状态（build 前）:"
+          ccache -s
 
-                  # base：LineageOS unpack_bootimg.py 不输出 base，但 v2 头部的所有 address 都是绝对值
-                  # 因此设 base=0，offset 直接用解出的绝对地址
-                  BASE="0x00000000"
+          # 记录 build 开始时间
+          START_TIME=$(date +%s)
 
-                  echo "BASE           = $BASE"
-                  echo "HEADER_VERSION = $HEADER_VERSION"
-                  echo "KERNEL_OFFSET  = $KERNEL_OFFSET"
-                  echo "RAMDISK_OFFSET = $RAMDISK_OFFSET"
-                  echo "SECOND_OFFSET  = $SECOND_OFFSET"
-                  echo "TAGS_OFFSET    = $TAGS_OFFSET"
-                  echo "DTB_OFFSET     = $DTB_OFFSET"
-                  echo "PAGESIZE       = $PAGESIZE"
-                  echo "OS_VERSION     = $OS_VERSION"
-                  echo "OS_PATCH_LEVEL = $OS_PATCH_LEVEL"
-                  echo "CMDLINE        = $CMDLINE"
-                  echo "PRODUCT_NAME   = $PRODUCT_NAME"
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            2>&1 | tee build.log
 
-                  echo "======================================"
-                  echo "===== Step 3: Replace kernel ====="
-                  echo "======================================"
-                  cp "$KERNEL_NEW" "$WORK/kernel"
-                  ls -lh "$WORK/kernel"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
 
-                  echo "======================================"
-                  echo "===== Step 4: Build mkbootimg args ====="
-                  echo "======================================"
-                  ARGS=(
-                    --header_version "$HEADER_VERSION"
-                    --kernel "$WORK/kernel"
-                    --ramdisk "$WORK/ramdisk"
-                    --base "$BASE"
-                    --kernel_offset "$KERNEL_OFFSET"
-                    --ramdisk_offset "$RAMDISK_OFFSET"
-                    --second_offset "$SECOND_OFFSET"
-                    --tags_offset "$TAGS_OFFSET"
-                    --pagesize "$PAGESIZE"
-                  )
+          echo ""
+          echo "===== Build 结束 ====="
+          echo "耗时: ${DURATION} 秒 ($((DURATION/60)) 分钟)"
+          echo "ccache 状态（build 后）:"
+          ccache -s
 
-                  # dtb：检查文件是否存在且非空
-                  DTB_SIZE=$(stat -c%s "$WORK/dtb" 2>/dev/null || echo 0)
-                  echo "DTB size: $DTB_SIZE bytes"
-                  if [ "$DTB_SIZE" -gt 0 ]; then
-                    ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTB_OFFSET")
-                  else
-                    echo "DTB is empty, skipping --dtb"
-                  fi
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== Build failed ====="
+            tail -100 build.log
+            exit 1
+          fi
 
-                  # cmdline：非空才加
-                  if [ -n "$CMDLINE" ]; then
-                    ARGS+=(--cmdline "$CMDLINE")
-                  fi
+          echo "===== New kernel image ====="
+          ls -lh out/arch/arm64/boot/Image.gz
 
-                  # os_version / os_patch_level：非空才加
-                  if [ -n "$OS_VERSION" ]; then
-                    ARGS+=(--os_version "$OS_VERSION")
-                  fi
-                  if [ -n "$OS_PATCH_LEVEL" ]; then
-                    ARGS+=(--os_patch_level "$OS_PATCH_LEVEL")
-                  fi
+      # ============ 8.5 展示 ccache 统计 ============
+      - name: Show ccache stats after build
+        if: always()
+        run: |
+          echo "===== 最终 ccache 统计 ====="
+          ccache -s -v
+          echo ""
+          echo "===== 缓存目录大小 ====="
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
 
-                  # product name（如果非空）
-                  if [ -n "$PRODUCT_NAME" ]; then
-                    ARGS+=(--board "$PRODUCT_NAME")
-                  fi
+      # ============ 9. 下载 LineageOS 官方 mkbootimg 工具 ============
+      - name: Fetch LineageOS mkbootimg tools
+        run: |
+          git clone --depth=1 -b lineage-22.2 \
+            https://github.com/LineageOS/android_system_tools_mkbootimg \
+            /tmp/lineage-mkbootimg
 
-                  echo "===== ARGS ====="
-                  printf '%s\n' "${ARGS[@]}"
+          echo "===== Available tools ====="
+          ls -la /tmp/lineage-mkbootimg/*.py
 
-                  echo "======================================"
-                  echo "===== Step 5: Repack boot.img ====="
-                  echo "======================================"
-                  python3 "$TOOLS/mkbootimg.py" "${ARGS[@]}" --output "$BOOT_OUT"
+          echo "===== mkbootimg.py --help ====="
+          python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -60 || true
 
-                  echo "======================================"
-                  echo "===== Step 6: Verify output ====="
-                  echo "======================================"
-                  ls -lh "$BOOT_OUT"
-                  file "$BOOT_OUT" || true
+      # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 + 补齐 ============
+      - name: Repack boot.img with new kernel
+        shell: bash
+        run: |
+          set -e
+          BOOT_SRC="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
+          BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
+          KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
+          WORK="/tmp/boot-work"
+          TOOLS="/tmp/lineage-mkbootimg"
 
-                  echo "===== Re-unpack to verify ====="
-                  rm -rf /tmp/boot-verify
-                  python3 "$TOOLS/unpack_bootimg.py" \
-                    --boot_img "$BOOT_OUT" \
-                    --out /tmp/boot-verify
-                  echo "===== New boot.img contents ====="
-                  ls -la /tmp/boot-verify/
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
 
-            # ============ 11. 上传新 boot.img ============
-            - name: Upload new boot.img
-              if: success()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: boot-flashlmdd-container-${{ github.run_number }}
-                  path: ${{ github.workspace }}/boot-flashlmdd-container.img
-                  retention-days: 7
+          echo "======================================"
+          echo "===== Step 1: Unpack boot.img ====="
+          echo "======================================"
+          UNPACK_OUT=$(python3 "$TOOLS/unpack_bootimg.py" \
+            --boot_img "$BOOT_SRC" \
+            --out "$WORK" 2>&1 | tee /dev/stderr)
 
-            # ============ 12. 上传编译日志 ============
-            - name: Upload build log
-              if: always()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: build-log-${{ github.run_number }}
-                  path: kernel/build.log
-                  retention-days: 7
+          echo "===== Unpacked files ====="
+          ls -la "$WORK/"
+
+          echo "======================================"
+          echo "===== Step 2: Dynamically parse params ====="
+          echo "======================================"
+
+          HEADER_VERSION=$(echo "$UNPACK_OUT" | grep -i "boot image header version" | awk -F: '{print $2}' | tr -d ' ')
+          KERNEL_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "kernel load address"        | awk -F: '{print $2}' | tr -d ' ')
+          RAMDISK_OFFSET=$(echo "$UNPACK_OUT" | grep -i "ramdisk load address"       | awk -F: '{print $2}' | tr -d ' ')
+          SECOND_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "second bootloader load address" | awk -F: '{print $2}' | tr -d ' ')
+          TAGS_OFFSET=$(echo "$UNPACK_OUT"    | grep -i "kernel tags load address"   | awk -F: '{print $2}' | tr -d ' ')
+          PAGESIZE=$(echo "$UNPACK_OUT"       | grep -i "^page size"                 | awk -F: '{print $2}' | tr -d ' ')
+          OS_VERSION=$(echo "$UNPACK_OUT"     | grep -i "^os version"                | awk -F: '{print $2}' | tr -d ' ')
+          OS_PATCH_LEVEL=$(echo "$UNPACK_OUT" | grep -i "^os patch level"            | awk -F: '{print $2}' | tr -d ' ')
+          CMDLINE=$(echo "$UNPACK_OUT"        | grep -i "^command line args"         | sed 's/^[^:]*: *//')
+          DTB_OFFSET=$(echo "$UNPACK_OUT"     | grep -i "^dtb address"               | awk -F: '{print $2}' | tr -d ' ')
+          PRODUCT_NAME=$(echo "$UNPACK_OUT"   | grep -i "^product name"              | awk -F: '{print $2}' | sed 's/^ *//')
+
+          BASE="0x00000000"
+
+          echo "BASE           = $BASE"
+          echo "HEADER_VERSION = $HEADER_VERSION"
+          echo "KERNEL_OFFSET  = $KERNEL_OFFSET"
+          echo "RAMDISK_OFFSET = $RAMDISK_OFFSET"
+          echo "SECOND_OFFSET  = $SECOND_OFFSET"
+          echo "TAGS_OFFSET    = $TAGS_OFFSET"
+          echo "DTB_OFFSET     = $DTB_OFFSET"
+          echo "PAGESIZE       = $PAGESIZE"
+          echo "OS_VERSION     = $OS_VERSION"
+          echo "OS_PATCH_LEVEL = $OS_PATCH_LEVEL"
+          echo "CMDLINE        = $CMDLINE"
+          echo "PRODUCT_NAME   = $PRODUCT_NAME"
+
+          echo "======================================"
+          echo "===== Step 3: Replace kernel ====="
+          echo "======================================"
+          cp "$KERNEL_NEW" "$WORK/kernel"
+          ls -lh "$WORK/kernel"
+
+          echo "======================================"
+          echo "===== Step 4: Build mkbootimg args ====="
+          echo "======================================"
+          ARGS=(
+            --header_version "$HEADER_VERSION"
+            --kernel "$WORK/kernel"
+            --ramdisk "$WORK/ramdisk"
+            --base "$BASE"
+            --kernel_offset "$KERNEL_OFFSET"
+            --ramdisk_offset "$RAMDISK_OFFSET"
+            --second_offset "$SECOND_OFFSET"
+            --tags_offset "$TAGS_OFFSET"
+            --pagesize "$PAGESIZE"
+          )
+
+          DTB_SIZE=$(stat -c%s "$WORK/dtb" 2>/dev/null || echo 0)
+          echo "DTB size: $DTB_SIZE bytes"
+          if [ "$DTB_SIZE" -gt 0 ]; then
+            ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTB_OFFSET")
+          else
+            echo "DTB is empty, skipping --dtb"
+          fi
+
+          if [ -n "$CMDLINE" ]; then
+            ARGS+=(--cmdline "$CMDLINE")
+          fi
+
+          if [ -n "$OS_VERSION" ]; then
+            ARGS+=(--os_version "$OS_VERSION")
+          fi
+          if [ -n "$OS_PATCH_LEVEL" ]; then
+            ARGS+=(--os_patch_level "$OS_PATCH_LEVEL")
+          fi
+
+          if [ -n "$PRODUCT_NAME" ]; then
+            ARGS+=(--board "$PRODUCT_NAME")
+          fi
+
+          echo "===== ARGS ====="
+          printf '%s\n' "${ARGS[@]}"
+
+          echo "======================================"
+          echo "===== Step 5: Repack boot.img ====="
+          echo "======================================"
+          python3 "$TOOLS/mkbootimg.py" "${ARGS[@]}" --output "$BOOT_OUT"
+
+          echo "======================================"
+          echo "===== Step 6: Verify output ====="
+          echo "======================================"
+          ls -lh "$BOOT_OUT"
+          file "$BOOT_OUT" || true
+
+          echo "===== Re-unpack to verify ====="
+          rm -rf /tmp/boot-verify
+          python3 "$TOOLS/unpack_bootimg.py" \
+            --boot_img "$BOOT_OUT" \
+            --out /tmp/boot-verify
+          echo "===== New boot.img contents ====="
+          ls -la /tmp/boot-verify/
+
+          echo "======================================"
+          echo "===== Step 7: Pad to original size ====="
+          echo "======================================"
+          ORIG_SIZE=$(stat -c%s "$BOOT_SRC")
+          NEW_SIZE=$(stat -c%s "$BOOT_OUT")
+          echo "Original boot.img size: $ORIG_SIZE bytes ($((ORIG_SIZE/1024/1024)) MB)"
+          echo "New boot.img size:      $NEW_SIZE bytes ($((NEW_SIZE/1024/1024)) MB)"
+          echo "Difference:             $((ORIG_SIZE - NEW_SIZE)) bytes"
+
+          if [ "$NEW_SIZE" -lt "$ORIG_SIZE" ]; then
+            echo "Padding new img to match original size..."
+            echo "Method: copy original, overwrite front with new content"
+
+            PADDED="/tmp/boot-padded.img"
+            cp "$BOOT_SRC" "$PADDED"
+            dd if="$BOOT_OUT" of="$PADDED" conv=notrunc bs=1M status=progress
+
+            PADDED_SIZE=$(stat -c%s "$PADDED")
+            echo "Padded size: $PADDED_SIZE bytes"
+
+            mv "$PADDED" "$BOOT_OUT"
+            echo "Final size: $(stat -c%s "$BOOT_OUT") bytes"
+
+            echo "===== Verify padded boot.img is still valid ====="
+            rm -rf /tmp/boot-verify
+            python3 "$TOOLS/unpack_bootimg.py" \
+              --boot_img "$BOOT_OUT" \
+              --out /tmp/boot-verify 2>&1 | grep -iE "kernel_size|ramdisk size|dtb size|header version" || true
+            echo "===== Padded boot.img unpacked ====="
+            ls -la /tmp/boot-verify/
+          else
+            echo "New img is already >= original size, no padding needed"
+          fi
+
+          echo "======================================"
+          echo "===== Final Summary ====="
+          echo "======================================"
+          echo "Output: $BOOT_OUT"
+          echo "Size:   $(stat -c%s "$BOOT_OUT") bytes"
+          ls -lh "$BOOT_OUT"
+
+      # ============ 11. 上传新 boot.img ============
+      - name: Upload new boot.img
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-flashlmdd-container-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-container.img
+          retention-days: 7
+
+      # ============ 12. 上传编译日志 ============
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 7
