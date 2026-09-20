@@ -38,7 +38,6 @@ jobs:
                   BOOT="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
                   if [ ! -f "$BOOT" ]; then
                     echo "::error::boot.img not found at $BOOT"
-                    echo "Contents of repo:"
                     ls -laR ${{ github.workspace }}/builder/ | head -50
                     exit 1
                   fi
@@ -80,25 +79,21 @@ jobs:
             - name: Clone toolchains
               shell: bash
               run: |
-                  # Clang：LineageOS 内核专用 clang-r416183b
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
                     /tmp/clang
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  # GCC 4.9 aarch64
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
                     /tmp/gcc64
                   echo "/tmp/gcc64/bin" >> $GITHUB_PATH
 
-                  # GCC 4.9 arm
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # 符号链接：去掉版本号
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
                     [ -e "$f" ] || continue
@@ -130,19 +125,15 @@ jobs:
 
                   CFG="out/.config"
 
-                  # 防御性：禁用 DWARF v5
                   ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
-                  # Namespaces
                   ./scripts/config --file $CFG \
                     -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
 
-                  # Cgroups
                   ./scripts/config --file $CFG \
                     -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
                     -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
 
-                  # 网络
                   ./scripts/config --file $CFG \
                     -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
                     -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
@@ -150,10 +141,8 @@ jobs:
                     -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
                     -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
 
-                  # OverlayFS
                   ./scripts/config --file $CFG -e OVERLAY_FS
 
-                  # 模块
                   ./scripts/config --file $CFG \
                     -m NETFILTER_XT_MATCH_ADDRTYPE \
                     -m NETFILTER_XT_MATCH_CONNTRACK \
@@ -209,13 +198,10 @@ jobs:
                   echo "===== Available tools ====="
                   ls -la /tmp/lineage-mkbootimg/*.py
 
-                  echo "===== unpack_bootimg.py --help ====="
-                  python3 /tmp/lineage-mkbootimg/unpack_bootimg.py --help | head -30 || true
-
                   echo "===== mkbootimg.py --help ====="
-                  python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -40 || true
+                  python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -60 || true
 
-            # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 ============
+            # ============ 10. 解包原 boot.img + 动态提取参数 + 重打包 ============
             - name: Repack boot.img with new kernel
               shell: bash
               run: |
@@ -232,58 +218,115 @@ jobs:
                   echo "======================================"
                   echo "===== Step 1: Unpack boot.img ====="
                   echo "======================================"
-                  python3 "$TOOLS/unpack_bootimg.py" \
+                  UNPACK_OUT=$(python3 "$TOOLS/unpack_bootimg.py" \
                     --boot_img "$BOOT_SRC" \
-                    --out "$WORK"
+                    --out "$WORK" 2>&1 | tee /dev/stderr)
 
                   echo "===== Unpacked files ====="
                   ls -la "$WORK/"
 
                   echo "======================================"
-                  echo "===== Step 2: Inspect unpacked info ====="
+                  echo "===== Step 2: Dynamically parse params ====="
                   echo "======================================"
-                  # 有些版本会生成 info 文件，打印出来方便调试
-                  for f in "$WORK"/*.txt "$WORK"/*.json; do
-                    [ -f "$f" ] && { echo "----- $f -----"; cat "$f"; }
-                  done || true
+
+                  # 从 unpack 输出里动态解析所有参数（不硬编码）
+                  HEADER_VERSION=$(echo "$UNPACK_OUT" | grep -i "boot image header version" | awk -F: '{print $2}' | tr -d ' ')
+                  KERNEL_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "kernel load address"        | awk -F: '{print $2}' | tr -d ' ')
+                  RAMDISK_OFFSET=$(echo "$UNPACK_OUT" | grep -i "ramdisk load address"       | awk -F: '{print $2}' | tr -d ' ')
+                  SECOND_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "second bootloader load address" | awk -F: '{print $2}' | tr -d ' ')
+                  TAGS_OFFSET=$(echo "$UNPACK_OUT"    | grep -i "kernel tags load address"   | awk -F: '{print $2}' | tr -d ' ')
+                  PAGESIZE=$(echo "$UNPACK_OUT"       | grep -i "^page size"                 | awk -F: '{print $2}' | tr -d ' ')
+                  OS_VERSION=$(echo "$UNPACK_OUT"     | grep -i "^os version"                | awk -F: '{print $2}' | tr -d ' ')
+                  OS_PATCH_LEVEL=$(echo "$UNPACK_OUT" | grep -i "^os patch level"            | awk -F: '{print $2}' | tr -d ' ')
+                  CMDLINE=$(echo "$UNPACK_OUT"        | grep -i "^command line args"         | sed 's/^[^:]*: *//')
+                  DTB_OFFSET=$(echo "$UNPACK_OUT"     | grep -i "^dtb address"               | awk -F: '{print $2}' | tr -d ' ')
+                  PRODUCT_NAME=$(echo "$UNPACK_OUT"   | grep -i "^product name"              | awk -F: '{print $2}' | sed 's/^ *//')
+
+                  # base：LineageOS unpack_bootimg.py 不输出 base，但 v2 头部的所有 address 都是绝对值
+                  # 因此设 base=0，offset 直接用解出的绝对地址
+                  BASE="0x00000000"
+
+                  echo "BASE           = $BASE"
+                  echo "HEADER_VERSION = $HEADER_VERSION"
+                  echo "KERNEL_OFFSET  = $KERNEL_OFFSET"
+                  echo "RAMDISK_OFFSET = $RAMDISK_OFFSET"
+                  echo "SECOND_OFFSET  = $SECOND_OFFSET"
+                  echo "TAGS_OFFSET    = $TAGS_OFFSET"
+                  echo "DTB_OFFSET     = $DTB_OFFSET"
+                  echo "PAGESIZE       = $PAGESIZE"
+                  echo "OS_VERSION     = $OS_VERSION"
+                  echo "OS_PATCH_LEVEL = $OS_PATCH_LEVEL"
+                  echo "CMDLINE        = $CMDLINE"
+                  echo "PRODUCT_NAME   = $PRODUCT_NAME"
 
                   echo "======================================"
                   echo "===== Step 3: Replace kernel ====="
                   echo "======================================"
-                  # unpack_bootimg.py 解出来的内核文件名可能是 kernel 或 boot.img-kernel
-                  if [ -f "$WORK/kernel" ]; then
-                    KERNEL_TARGET="$WORK/kernel"
-                  elif [ -f "$WORK/boot.img-kernel" ]; then
-                    KERNEL_TARGET="$WORK/boot.img-kernel"
+                  cp "$KERNEL_NEW" "$WORK/kernel"
+                  ls -lh "$WORK/kernel"
+
+                  echo "======================================"
+                  echo "===== Step 4: Build mkbootimg args ====="
+                  echo "======================================"
+                  ARGS=(
+                    --header_version "$HEADER_VERSION"
+                    --kernel "$WORK/kernel"
+                    --ramdisk "$WORK/ramdisk"
+                    --base "$BASE"
+                    --kernel_offset "$KERNEL_OFFSET"
+                    --ramdisk_offset "$RAMDISK_OFFSET"
+                    --second_offset "$SECOND_OFFSET"
+                    --tags_offset "$TAGS_OFFSET"
+                    --pagesize "$PAGESIZE"
+                  )
+
+                  # dtb：检查文件是否存在且非空
+                  DTB_SIZE=$(stat -c%s "$WORK/dtb" 2>/dev/null || echo 0)
+                  echo "DTB size: $DTB_SIZE bytes"
+                  if [ "$DTB_SIZE" -gt 0 ]; then
+                    ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTB_OFFSET")
                   else
-                    echo "::error::Unpacked kernel not found"
-                    ls -la "$WORK/"
-                    exit 1
+                    echo "DTB is empty, skipping --dtb"
                   fi
-                  cp "$KERNEL_NEW" "$KERNEL_TARGET"
-                  ls -lh "$KERNEL_TARGET"
+
+                  # cmdline：非空才加
+                  if [ -n "$CMDLINE" ]; then
+                    ARGS+=(--cmdline "$CMDLINE")
+                  fi
+
+                  # os_version / os_patch_level：非空才加
+                  if [ -n "$OS_VERSION" ]; then
+                    ARGS+=(--os_version "$OS_VERSION")
+                  fi
+                  if [ -n "$OS_PATCH_LEVEL" ]; then
+                    ARGS+=(--os_patch_level "$OS_PATCH_LEVEL")
+                  fi
+
+                  # product name（如果非空）
+                  if [ -n "$PRODUCT_NAME" ]; then
+                    ARGS+=(--board "$PRODUCT_NAME")
+                  fi
+
+                  echo "===== ARGS ====="
+                  printf '%s\n' "${ARGS[@]}"
 
                   echo "======================================"
-                  echo "===== Step 4: Repack boot.img ====="
+                  echo "===== Step 5: Repack boot.img ====="
                   echo "======================================"
-                  # repack_bootimg.py 会自动读取原 boot.img 的所有参数
-                  # 只替换 kernel，其余 ramdisk/dtb/cmdline/offset 都保持原样
-                  python3 "$TOOLS/repack_bootimg.py" \
-                    --boot_img "$BOOT_SRC" \
-                    --out "$BOOT_OUT" \
-                    --kernel "$KERNEL_TARGET"
+                  python3 "$TOOLS/mkbootimg.py" "${ARGS[@]}" --output "$BOOT_OUT"
 
                   echo "======================================"
-                  echo "===== Step 5: Verify output ====="
+                  echo "===== Step 6: Verify output ====="
                   echo "======================================"
                   ls -lh "$BOOT_OUT"
                   file "$BOOT_OUT" || true
 
-                  echo "===== Verify new boot.img can be unpacked ====="
+                  echo "===== Re-unpack to verify ====="
                   rm -rf /tmp/boot-verify
                   python3 "$TOOLS/unpack_bootimg.py" \
                     --boot_img "$BOOT_OUT" \
                     --out /tmp/boot-verify
+                  echo "===== New boot.img contents ====="
                   ls -la /tmp/boot-verify/
 
             # ============ 11. 上传新 boot.img ============
