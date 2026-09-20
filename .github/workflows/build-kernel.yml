@@ -65,7 +65,8 @@ jobs:
                     libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
                     libxml2 libxml2-utils lzop pngcrush rsync schedtool \
                     squashfs-tools xsltproc zip zlib1g-dev unzip \
-                    python3 python-is-python3 libncurses5-dev libncursesw5-dev
+                    python3 python-is-python3 python3-pip \
+                    libncurses5-dev libncursesw5-dev
                   sudo apt-get install -y libncurses5 libtinfo5 || true
 
             # ============ 4. ccache 缓存 ============
@@ -79,7 +80,7 @@ jobs:
             - name: Clone toolchains
               shell: bash
               run: |
-                  # Clang：LineageOS 内核专用
+                  # Clang：LineageOS 内核专用 clang-r416183b
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
                     /tmp/clang
@@ -97,7 +98,7 @@ jobs:
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # 符号链接
+                  # 符号链接：去掉版本号
                   cd /tmp/gcc64/bin
                   for f in aarch64-linux-android-4.9-*; do
                     [ -e "$f" ] || continue
@@ -198,23 +199,21 @@ jobs:
                   echo "===== New kernel image ====="
                   ls -lh out/arch/arm64/boot/Image.gz
 
-            # ============ 9. 编译 mkbootimg_tools ============
-            - name: Fetch and build mkbootimg_tools
+            # ============ 9. 下载 LineageOS 官方 mkbootimg 工具 ============
+            - name: Fetch LineageOS mkbootimg tools
               run: |
-                  git clone --depth=1 \
-                    https://github.com/opensourcefuture/android-unpackbootimg \
-                    /tmp/mkbootimg_tools
-                  cd /tmp/mkbootimg_tools
-                  make
+                  git clone --depth=1 -b lineage-22.2 \
+                    https://github.com/LineageOS/android_system_tools_mkbootimg \
+                    /tmp/lineage-mkbootimg
 
-                  echo "===== mkbootimg_tools built ====="
-                  ls -la /tmp/mkbootimg_tools/
-                  file /tmp/mkbootimg_tools/unpackbootimg || true
-                  file /tmp/mkbootimg_tools/mkbootimg || true
+                  echo "===== Available tools ====="
+                  ls -la /tmp/lineage-mkbootimg/*.py
 
-                  echo "===== Tool help ====="
-                  /tmp/mkbootimg_tools/unpackbootimg 2>&1 | head -10 || true
-                  /tmp/mkbootimg_tools/mkbootimg 2>&1 | head -10 || true
+                  echo "===== unpack_bootimg.py --help ====="
+                  python3 /tmp/lineage-mkbootimg/unpack_bootimg.py --help | head -30 || true
+
+                  echo "===== mkbootimg.py --help ====="
+                  python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -40 || true
 
             # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 ============
             - name: Repack boot.img with new kernel
@@ -225,7 +224,7 @@ jobs:
                   BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
                   KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
                   WORK="/tmp/boot-work"
-                  TOOLS="/tmp/mkbootimg_tools"
+                  TOOLS="/tmp/lineage-mkbootimg"
 
                   rm -rf "$WORK"
                   mkdir -p "$WORK"
@@ -233,96 +232,59 @@ jobs:
                   echo "======================================"
                   echo "===== Step 1: Unpack boot.img ====="
                   echo "======================================"
-                  "$TOOLS/unpackbootimg" -i "$BOOT_SRC" -o "$WORK/"
+                  python3 "$TOOLS/unpack_bootimg.py" \
+                    --boot_img "$BOOT_SRC" \
+                    --out "$WORK"
+
                   echo "===== Unpacked files ====="
                   ls -la "$WORK/"
 
-                  cd "$WORK"
-
                   echo "======================================"
-                  echo "===== Step 2: Read original params ====="
+                  echo "===== Step 2: Inspect unpacked info ====="
                   echo "======================================"
-                  BASE=$(cat boot.img-base 2>/dev/null | tr -d '\0' || echo "0x00000000")
-                  PAGESIZE=$(cat boot.img-pagesize 2>/dev/null | tr -d '\0' || echo "4096")
-                  KERNELOFF=$(cat boot.img-kerneloff 2>/dev/null | tr -d '\0' || echo "0x00008000")
-                  RAMDISKOFF=$(cat boot.img-ramdiskoff 2>/dev/null | tr -d '\0' || echo "0x01000000")
-                  TAGSOFF=$(cat boot.img-tagsoff 2>/dev/null | tr -d '\0' || echo "0x00000100")
-                  DTBOFF=$(cat boot.img-dtboff 2>/dev/null | tr -d '\0' || echo "0x01f00000")
-                  CMDLINE=$(cat boot.img-cmdline 2>/dev/null | tr -d '\0' || echo "")
-                  BOARD=$(cat boot.img-board 2>/dev/null | tr -d '\0' || echo "")
-
-                  echo "BASE=$BASE"
-                  echo "PAGESIZE=$PAGESIZE"
-                  echo "KERNELOFF=$KERNELOFF"
-                  echo "RAMDISKOFF=$RAMDISKOFF"
-                  echo "TAGSOFF=$TAGSOFF"
-                  echo "DTBOFF=$DTBOFF"
-                  echo "CMDLINE=$CMDLINE"
-                  echo "BOARD=$BOARD"
+                  # 有些版本会生成 info 文件，打印出来方便调试
+                  for f in "$WORK"/*.txt "$WORK"/*.json; do
+                    [ -f "$f" ] && { echo "----- $f -----"; cat "$f"; }
+                  done || true
 
                   echo "======================================"
                   echo "===== Step 3: Replace kernel ====="
                   echo "======================================"
-                  cp "$KERNEL_NEW" "$WORK/boot.img-kernel"
-                  ls -lh "$WORK/boot.img-kernel"
-
-                  echo "======================================"
-                  echo "===== Step 4: Build mkbootimg args ====="
-                  echo "======================================"
-                  ARGS=(
-                    --kernel "$WORK/boot.img-kernel"
-                    --base "$BASE"
-                    --pagesize "$PAGESIZE"
-                    --kernel_offset "$KERNELOFF"
-                    --ramdisk_offset "$RAMDISKOFF"
-                    --tags_offset "$TAGSOFF"
-                  )
-
-                  # Ramdisk
-                  if [ -f "$WORK/boot.img-ramdisk.gz" ]; then
-                    ARGS+=(--ramdisk "$WORK/boot.img-ramdisk.gz")
-                  elif [ -f "$WORK/boot.img-ramdisk" ]; then
-                    ARGS+=(--ramdisk "$WORK/boot.img-ramdisk")
-                  elif [ -f "$WORK/ramdisk.gz" ]; then
-                    ARGS+=(--ramdisk "$WORK/ramdisk.gz")
+                  # unpack_bootimg.py 解出来的内核文件名可能是 kernel 或 boot.img-kernel
+                  if [ -f "$WORK/kernel" ]; then
+                    KERNEL_TARGET="$WORK/kernel"
+                  elif [ -f "$WORK/boot.img-kernel" ]; then
+                    KERNEL_TARGET="$WORK/boot.img-kernel"
                   else
-                    echo "::error::ramdisk not found in unpacked output"
+                    echo "::error::Unpacked kernel not found"
                     ls -la "$WORK/"
                     exit 1
                   fi
-
-                  # DTB (不同版本命名可能不同)
-                  if [ -f "$WORK/boot.img-dt" ]; then
-                    ARGS+=(--dtb "$WORK/boot.img-dt" --dtb_offset "$DTBOFF")
-                  elif [ -f "$WORK/boot.img-dtb" ]; then
-                    ARGS+=(--dtb "$WORK/boot.img-dtb" --dtb_offset "$DTBOFF")
-                  elif [ -f "$WORK/dtb" ]; then
-                    ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTBOFF")
-                  fi
-
-                  # Cmdline
-                  if [ -n "$CMDLINE" ]; then
-                    ARGS+=(--cmdline "$CMDLINE")
-                  fi
-
-                  # Board
-                  if [ -n "$BOARD" ]; then
-                    ARGS+=(--board "$BOARD")
-                  fi
-
-                  echo "===== ARGS ====="
-                  printf '%s\n' "${ARGS[@]}"
+                  cp "$KERNEL_NEW" "$KERNEL_TARGET"
+                  ls -lh "$KERNEL_TARGET"
 
                   echo "======================================"
-                  echo "===== Step 5: Repack boot.img ====="
+                  echo "===== Step 4: Repack boot.img ====="
                   echo "======================================"
-                  "$TOOLS/mkbootimg" "${ARGS[@]}" -o "$BOOT_OUT"
+                  # repack_bootimg.py 会自动读取原 boot.img 的所有参数
+                  # 只替换 kernel，其余 ramdisk/dtb/cmdline/offset 都保持原样
+                  python3 "$TOOLS/repack_bootimg.py" \
+                    --boot_img "$BOOT_SRC" \
+                    --out "$BOOT_OUT" \
+                    --kernel "$KERNEL_TARGET"
 
                   echo "======================================"
-                  echo "===== Step 6: Verify output ====="
+                  echo "===== Step 5: Verify output ====="
                   echo "======================================"
                   ls -lh "$BOOT_OUT"
                   file "$BOOT_OUT" || true
+
+                  echo "===== Verify new boot.img can be unpacked ====="
+                  rm -rf /tmp/boot-verify
+                  python3 "$TOOLS/unpack_bootimg.py" \
+                    --boot_img "$BOOT_OUT" \
+                    --out /tmp/boot-verify
+                  ls -la /tmp/boot-verify/
 
             # ============ 11. 上传新 boot.img ============
             - name: Upload new boot.img
