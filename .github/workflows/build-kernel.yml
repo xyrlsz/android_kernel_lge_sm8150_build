@@ -16,6 +16,7 @@ env:
     KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
     ARCH: arm64
     SUBARCH: arm64
+    CLANG_VERSION: "r510928" # 可改为 r536225 等
     GCC64_VERSION: "master"
     GCC32_VERSION: "master"
 
@@ -54,15 +55,16 @@ jobs:
                   key: sm8150-${{ github.event.inputs.kernel_branch }}
                   max-size: 2G
 
-            # ============ 4. 下载工具链（Neutron Clang + AOSP GCC） ============
+            # ============ 4. 下载工具链（AOSP archive tarball + GCC） ============
             - name: Clone toolchains
               run: |
-                  # --- Clang：从 Neutron Releases 下载 tarball ---
+                  # --- Clang：用 Gitiles archive 下载单个版本目录 ---
                   mkdir -p /tmp/clang
-                  curl -L --retry 3 --retry-delay 5 \
-                    -o /tmp/neutron-clang.tar.zst \
-                    https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/latest/download/neutron-clang.tar.zst
-                  tar --zstd -xf /tmp/neutron-clang.tar.zst -C /tmp/clang --strip-components=1
+                  curl -L --retry 3 --retry-delay 5 -o /tmp/clang.tar.gz \
+                    "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-${{ env.CLANG_VERSION }}.tar.gz"
+                  # 检查文件大小，避免再出现 9 字节的情况
+                  ls -lh /tmp/clang.tar.gz
+                  tar -xzf /tmp/clang.tar.gz -C /tmp/clang
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
                   # --- GCC 4.9（AOSP 预编译，体积小） ---
@@ -76,9 +78,9 @@ jobs:
                     -b ${{ env.GCC32_VERSION }} /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # --- 验证编译器存在 ---
+                  # --- 验证工具链存在 ---
                   echo "===== Toolchain check ====="
-                  ls /tmp/clang/bin/clang || true
+                  /tmp/clang/bin/clang --version || true
                   ls /tmp/gcc64/bin/aarch64-linux-android-gcc || true
                   ls /tmp/gcc32/bin/arm-linux-androideabi-gcc || true
 
@@ -92,11 +94,9 @@ jobs:
                   export CROSS_COMPILE=aarch64-linux-android-
                   export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-                  # --- 5.1 生成基础 .config ---
                   make O=out ARCH=arm64 SUBARCH=arm64 \
                     ${{ github.event.inputs.defconfig_path }}
 
-                  # --- 5.2 用 scripts/config 注入容器相关配置 ---
                   CFG="out/.config"
 
                   ./scripts/config --file $CFG \
@@ -138,10 +138,8 @@ jobs:
                     -m NETFILTER_XT_MATCH_CONNTRACK \
                     -m NETFILTER_XT_MATCH_IPVS
 
-                  # --- 5.3 自动处理 Kconfig 依赖 ---
                   make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
-                  # --- 5.4 打印关键配置，验证是否生效 ---
                   echo "===== Container-related config check ====="
                   grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
                     out/.config || true
@@ -162,7 +160,7 @@ jobs:
                     CROSS_COMPILE=aarch64-linux-android- \
                     CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-            # ============ 7. 打包成 AnyKernel3 刷机包 ============
+            # ============ 7. 打包 ============
             - name: Package with AnyKernel3
               run: |
                   git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
