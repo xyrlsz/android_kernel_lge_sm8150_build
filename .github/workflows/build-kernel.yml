@@ -16,6 +16,7 @@ env:
     KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
     ARCH: arm64
     SUBARCH: arm64
+    CLANG_VERSION: "r450784e" # Android 13 时代 Clang 14，兼容 4.14 内核
 
 jobs:
     build:
@@ -56,15 +57,18 @@ jobs:
             - name: Clone toolchains
               shell: bash
               run: |
-                  # --- Clang：WeebX Clang（已验证可用） ---
+                  # --- Clang：AOSP r450784e（Clang 14，4.14 内核适配）---
+                  # 用 sparse-checkout 只拉取需要的单个版本目录
+                  git clone --filter=blob:none --sparse --depth=1 \
+                    https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+                    /tmp/clang-repo
+                  cd /tmp/clang-repo
+                  git sparse-checkout set clang-${{ env.CLANG_VERSION }}
                   mkdir -p /tmp/clang
-                  curl -L --retry 3 --retry-delay 5 -o /tmp/weebx-clang.tar.gz \
-                    https://github.com/XSans0/WeebX-Clang/releases/download/WeebX-Clang-19.1.5-release/WeebX-Clang-19.1.5.tar.gz
-                  ls -lh /tmp/weebx-clang.tar.gz
-                  tar -xzf /tmp/weebx-clang.tar.gz -C /tmp/clang --strip-components=1
+                  cp -r clang-${{ env.CLANG_VERSION }}/* /tmp/clang/
                   echo "/tmp/clang/bin" >> $GITHUB_PATH
 
-                  # --- GCC 4.9：改用 LineageOS 官方 GitHub 镜像 ---
+                  # --- GCC 4.9：LineageOS 官方 GitHub 镜像 ---
                   git clone --depth=1 \
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
                     /tmp/gcc64
@@ -74,16 +78,6 @@ jobs:
                     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
                     /tmp/gcc32
                   echo "/tmp/gcc32/bin" >> $GITHUB_PATH
-
-                  # --- 调试：打印目录结构 ---
-                  echo "===== /tmp/gcc64 top-level ====="
-                  ls /tmp/gcc64
-                  echo "===== /tmp/gcc64/bin (first 20) ====="
-                  ls /tmp/gcc64/bin | head -20 || echo "bin/ NOT FOUND"
-                  echo "===== /tmp/gcc32 top-level ====="
-                  ls /tmp/gcc32
-                  echo "===== /tmp/gcc32/bin (first 20) ====="
-                  ls /tmp/gcc32/bin | head -20 || echo "bin/ NOT FOUND"
 
                   # --- 创建不带版本号的符号链接 ---
                   echo "===== Creating symlinks for GCC 64-bit ====="
@@ -124,10 +118,14 @@ jobs:
                   make O=out ARCH=arm64 SUBARCH=arm64 \
                     ${{ github.event.inputs.defconfig_path }}
 
-                  # --- 5.2 用 scripts/config 注入容器相关配置 ---
+                  # --- 5.2 注入容器配置 ---
                   CFG="out/.config"
 
-                  # Namespaces（容器隔离的核心）
+                  # 防御性：即使 Clang 14 也禁用 DWARF v5 默认选项，用 v4 更稳
+                  ./scripts/config --file $CFG \
+                    -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+
+                  # Namespaces
                   ./scripts/config --file $CFG \
                     -e NAMESPACES \
                     -e NET_NS \
@@ -136,7 +134,7 @@ jobs:
                     -e UTS_NS \
                     -e USER_NS
 
-                  # Control Groups（资源限制）
+                  # Cgroups
                   ./scripts/config --file $CFG \
                     -e CGROUPS \
                     -e CGROUP_DEVICE \
@@ -147,7 +145,7 @@ jobs:
                     -e CPUSETS \
                     -e MEMCG
 
-                  # 网络相关（容器间通信）
+                  # 网络
                   ./scripts/config --file $CFG \
                     -e VETH \
                     -e BRIDGE \
@@ -162,10 +160,10 @@ jobs:
                     -e NETFILTER_XT_TARGET_REDIRECT \
                     -e IP_VS
 
-                  # OverlayFS（Docker overlay2 存储驱动）
+                  # OverlayFS
                   ./scripts/config --file $CFG -e OVERLAY_FS
 
-                  # 部分网络过滤项作为模块编译更稳妥
+                  # 部分网络过滤项作为模块
                   ./scripts/config --file $CFG \
                     -m NETFILTER_XT_MATCH_ADDRTYPE \
                     -m NETFILTER_XT_MATCH_CONNTRACK \
@@ -174,10 +172,12 @@ jobs:
                   # --- 5.3 自动处理 Kconfig 依赖 ---
                   make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
-                  # --- 5.4 打印关键配置，验证是否生效 ---
+                  # --- 5.4 验证 ---
                   echo "===== Container-related config check ====="
                   grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
                     out/.config || true
+                  echo "===== DWARF config check ====="
+                  grep -E "CONFIG_DEBUG_INFO_DWARF" out/.config || true
 
             # ============ 6. 编译内核 ============
             - name: Build kernel
@@ -201,15 +201,12 @@ jobs:
                   git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
                   cd /tmp/AnyKernel3
 
-                  # 拷贝内核产物
                   cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz-dtb .
 
-                  # 可选：拷贝 dtbo（如果设备需要）
                   if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
                     cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
                   fi
 
-                  # 清理并打包
                   rm -rf .git
                   zip -r9 kernel-flashlmdd-container.zip . -x "*.git*"
 
