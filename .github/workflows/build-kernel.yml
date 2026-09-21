@@ -1,4 +1,4 @@
-name: Build Container-Supported Kernel (LG G8) + boot.img Repack
+name: Build Container-Supported Kernel (LG V50) + boot.img Repack
 
 on:
   workflow_dispatch:
@@ -80,12 +80,10 @@ jobs:
       - name: Setup ccache shim for clang
         shell: bash
         run: |
-          # 找到 ccache 二进制
           CCACHE_BIN=$(which ccache)
           echo "ccache binary: $CCACHE_BIN"
           echo "ccache version: $(ccache --version | head -1)"
 
-          # 创建 shim 目录
           mkdir -p /tmp/ccache-shim
           ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang
           ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang++
@@ -93,7 +91,6 @@ jobs:
           echo "===== ccache shim ====="
           ls -la /tmp/ccache-shim/
 
-          # 写入 ccache 环境变量（供后续所有步骤使用）
           {
             echo "CCACHE_MAXSIZE=5G"
             echo "CCACHE_COMPRESS=true"
@@ -156,12 +153,9 @@ jobs:
           which ccache
 
           echo "===== 测试 ccache 拦截 ====="
-          # 第一次调用（miss）
           echo 'int main(){return 0;}' > /tmp/test.c
           clang -c /tmp/test.c -o /tmp/test.o
           echo "第一次编译完成"
-
-          # 第二次调用（hit）
           clang -c /tmp/test.c -o /tmp/test.o
           echo "第二次编译完成"
 
@@ -188,15 +182,36 @@ jobs:
 
           CFG="out/.config"
 
+          # 防御性：禁用 DWARF v5
           ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
+          # ============================================
+          # Namespaces（含 IPC_NS 的 Kconfig 依赖）
+          # IPC_NS 依赖 SYSVIPC 或 POSIX_MQUEUE，缺失会被 olddefconfig 关闭
+          # ============================================
           ./scripts/config --file $CFG \
-            -e NAMESPACES -e NET_NS -e PID_NS -e IPC_NS -e UTS_NS -e USER_NS
+            -e NAMESPACES \
+            -e NET_NS \
+            -e PID_NS \
+            -e UTS_NS \
+            -e USER_NS \
+            -e SYSVIPC \
+            -e POSIX_MQUEUE \
+            -e IPC_NS
 
+          # ============================================
+          # devtmpfs（Droidspaces 硬件访问模式需要）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT
+
+          # Cgroups
           ./scripts/config --file $CFG \
             -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
             -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
 
+          # 网络
           ./scripts/config --file $CFG \
             -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
             -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
@@ -204,8 +219,10 @@ jobs:
             -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
             -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
 
+          # OverlayFS
           ./scripts/config --file $CFG -e OVERLAY_FS
 
+          # 模块
           ./scripts/config --file $CFG \
             -m NETFILTER_XT_MATCH_ADDRTYPE \
             -m NETFILTER_XT_MATCH_CONNTRACK \
@@ -214,8 +231,12 @@ jobs:
           make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
           echo "===== Container config check ====="
-          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
+          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS)=" \
             out/.config || true
+
+          echo ""
+          echo "===== IPC_NS 依赖状态 ====="
+          grep -E "CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS)" out/.config || true
 
       # ============ 7. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
@@ -240,7 +261,6 @@ jobs:
           echo "ccache 状态（build 前）:"
           ccache -s
 
-          # 记录 build 开始时间
           START_TIME=$(date +%s)
 
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
