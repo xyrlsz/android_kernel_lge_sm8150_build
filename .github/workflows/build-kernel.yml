@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      # ============ 1. 拉取本仓库（含 prebuilt/boot.img） ============
+      # ============ 1. 拉取本仓库 ============
       - name: Checkout this repo
         uses: actions/checkout@v4
         with:
@@ -68,28 +68,21 @@ jobs:
             libncurses5-dev libncursesw5-dev
           sudo apt-get install -y libncurses5 libtinfo5 || true
 
-      # ============ 4. ccache 缓存 ============
+      # ============ 4. ccache ============
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: sm8150-${{ github.event.inputs.kernel_branch }}-clang
+          key: sm8150-${{ github.event.inputs.kernel_branch }}-clang-v2
           max-size: 5G
           verbose: 1
 
-      # ============ 4.5 创建 ccache shim 拦截 clang ============
       - name: Setup ccache shim for clang
         shell: bash
         run: |
           CCACHE_BIN=$(which ccache)
-          echo "ccache binary: $CCACHE_BIN"
-          echo "ccache version: $(ccache --version | head -1)"
-
           mkdir -p /tmp/ccache-shim
           ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang
           ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang++
-
-          echo "===== ccache shim ====="
-          ls -la /tmp/ccache-shim/
 
           {
             echo "CCACHE_MAXSIZE=5G"
@@ -100,11 +93,7 @@ jobs:
             echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime"
           } >> $GITHUB_ENV
 
-          echo "===== Environment variables set ====="
-          echo "CCACHE_DIR=$CCACHE_DIR"
-          echo "CCACHE_MAXSIZE=5G"
-          echo "CCACHE_COMPRESS=true"
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
+          ccache -s
 
       # ============ 5. 下载工具链 ============
       - name: Clone toolchains
@@ -136,33 +125,9 @@ jobs:
             ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
           done
 
-          echo "===== Toolchain check ====="
           /tmp/clang/bin/clang --version || true
-          ls -l /tmp/gcc64/bin/aarch64-linux-android-ld || true
-          ls -l /tmp/gcc32/bin/arm-linux-androideabi-ld || true
 
-      # ============ 5.5 验证 ccache 拦截 clang ============
-      - name: Verify ccache intercepts clang
-        shell: bash
-        run: |
-          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-
-          echo "===== which clang ====="
-          which clang
-          echo "===== which ccache ====="
-          which ccache
-
-          echo "===== 测试 ccache 拦截 ====="
-          echo 'int main(){return 0;}' > /tmp/test.c
-          clang -c /tmp/test.c -o /tmp/test.o
-          echo "第一次编译完成"
-          clang -c /tmp/test.c -o /tmp/test.o
-          echo "第二次编译完成"
-
-          echo "===== ccache 统计（应该有 1 hit, 1 miss）====="
-          ccache -s
-
-      # ============ 6. 配置内核 + 注入容器支持 ============
+      # ============ 6. 配置内核 + 注入全部容器支持 ============
       - name: Configure kernel
         working-directory: ./kernel
         run: |
@@ -172,22 +137,16 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-          echo "===== ccache 环境 ====="
-          echo "CCACHE_DIR=$CCACHE_DIR"
-          echo "CCACHE_BASEDIR=$CCACHE_BASEDIR"
-          ccache -s
-
           make O=out ARCH=arm64 SUBARCH=arm64 \
             ${{ github.event.inputs.defconfig_path }}
 
           CFG="out/.config"
 
-          # 防御性：禁用 DWARF v5
+          # 禁用 DWARF v5
           ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
           # ============================================
-          # Namespaces（含 IPC_NS 的 Kconfig 依赖）
-          # IPC_NS 依赖 SYSVIPC 或 POSIX_MQUEUE，缺失会被 olddefconfig 关闭
+          # 1. Namespaces
           # ============================================
           ./scripts/config --file $CFG \
             -e NAMESPACES \
@@ -200,43 +159,218 @@ jobs:
             -e IPC_NS
 
           # ============================================
-          # devtmpfs（Droidspaces 硬件访问模式需要）
+          # 2. devtmpfs
           # ============================================
           ./scripts/config --file $CFG \
             -e DEVTMPFS \
             -e DEVTMPFS_MOUNT
 
-          # Cgroups
+          # ============================================
+          # 3. Cgroups
+          # ============================================
           ./scripts/config --file $CFG \
-            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
-            -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG
+            -e CGROUPS \
+            -e CGROUP_DEVICE \
+            -e CGROUP_HUGETLB \
+            -e NET_CLS_CGROUP \
+            -e CGROUP_FREEZER \
+            -e CGROUP_SCHED \
+            -e CPUSETS \
+            -e MEMCG \
+            -e CGROUP_BPF \
+            -e CGROUP_PIDS \
+            -e CGROUP_NET_PRIO
 
-          # 网络
+          # ============================================
+          # 4. 网络基础（容器必需）
+          # ============================================
           ./scripts/config --file $CFG \
-            -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NF_NAT \
-            -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
-            -e NETFILTER_XT_MATCH_IPVS -e NETFILTER_XT_MARK \
-            -e NETFILTER_XT_NAT -e NETFILTER_XT_TARGET_MASQUERADE \
-            -e NETFILTER_XT_TARGET_REDIRECT -e IP_VS
+            -e VETH \
+            -e BRIDGE \
+            -e BRIDGE_NETFILTER \
+            -e NETFILTER_ADVANCED \
+            -e NF_CONNTRACK \
+            -e NF_NAT \
+            -e NF_NAT_IPV4 \
+            -e NF_NAT_IPV6 \
+            -e NETFILTER_XTABLES
 
-          # OverlayFS
-          ./scripts/config --file $CFG -e OVERLAY_FS
-
-          # 模块
+          # ============================================
+          # 5. iptables 各表（全部内建 =y）
+          # ============================================
           ./scripts/config --file $CFG \
-            -m NETFILTER_XT_MATCH_ADDRTYPE \
-            -m NETFILTER_XT_MATCH_CONNTRACK \
-            -m NETFILTER_XT_MATCH_IPVS
+            -e IP_NF_IPTABLES \
+            -e IP_NF_FILTER \
+            -e IP_NF_NAT \
+            -e IP_NF_MANGLE \
+            -e IP_NF_RAW \
+            -e IP_NF_ARPTABLES \
+            -e IP_NF_TARGET_MASQUERADE \
+            -e IP_NF_TARGET_REDIRECT \
+            -e IP6_NF_IPTABLES \
+            -e IP6_NF_FILTER \
+            -e IP6_NF_NAT \
+            -e IP6_NF_MANGLE \
+            -e IP6_NF_RAW \
+            -e IP6_NF_TARGET_MASQUERADE
+
+          # ============================================
+          # 6. Netfilter 扩展匹配/目标
+          # 关键：从 =m 改为 =y，内建进内核
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NETFILTER_XT_MATCH_ADDRTYPE \
+            -e NETFILTER_XT_MATCH_CONNTRACK \
+            -e NETFILTER_XT_MATCH_CONNMARK \
+            -e NETFILTER_XT_MATCH_MARK \
+            -e NETFILTER_XT_MATCH_COMMENT \
+            -e NETFILTER_XT_MATCH_STATE \
+            -e NETFILTER_XT_MATCH_MULTIPORT \
+            -e NETFILTER_XT_MATCH_IPRANGE \
+            -e NETFILTER_XT_MATCH_LIMIT \
+            -e NETFILTER_XT_MATCH_MAC \
+            -e NETFILTER_XT_MATCH_OWNER \
+            -e NETFILTER_XT_MATCH_PKTTYPE \
+            -e NETFILTER_XT_MATCH_QUOTA \
+            -e NETFILTER_XT_MATCH_SOCKET \
+            -e NETFILTER_XT_MATCH_TCPMSS \
+            -e NETFILTER_XT_MATCH_HL \
+            -e NETFILTER_XT_MATCH_ESP \
+            -e NETFILTER_XT_MATCH_HELPER \
+            -e NETFILTER_XT_MATCH_POLICY \
+            -e NETFILTER_XT_MATCH_STATISTIC \
+            -e NETFILTER_XT_MATCH_STRING \
+            -e NETFILTER_XT_MATCH_TIME \
+            -e NETFILTER_XT_MATCH_U32 \
+            -e NETFILTER_XT_MATCH_DSCP \
+            -e NETFILTER_XT_MATCH_ECN \
+            -e NETFILTER_XT_MATCH_HASHLIMIT
+
+          ./scripts/config --file $CFG \
+            -e NETFILTER_XT_TARGET_MASQUERADE \
+            -e NETFILTER_XT_TARGET_REDIRECT \
+            -e NETFILTER_XT_TARGET_MARK \
+            -e NETFILTER_XT_TARGET_NETMAP \
+            -e NETFILTER_XT_TARGET_CONNMARK \
+            -e NETFILTER_XT_TARGET_CT \
+            -e NETFILTER_XT_TARGET_HL \
+            -e NETFILTER_XT_TARGET_DSCP \
+            -e NETFILTER_XT_TARGET_TCPMSS \
+            -e NETFILTER_XT_TARGET_CLASSIFY \
+            -e NETFILTER_XT_TARGET_IDLETIMER \
+            -e NETFILTER_XT_TARGET_TRACE
+
+          # 关闭已有模块选项，避免以 =m 生成
+          ./scripts/config --file $CFG \
+            -d NETFILTER_XT_MATCH_ADDRTYPE \
+            -d NETFILTER_XT_MATCH_CONNTRACK
+
+          # 用 -e 重新启用为 =y
+          ./scripts/config --file $CFG \
+            -e NETFILTER_XT_MATCH_ADDRTYPE \
+            -e NETFILTER_XT_MATCH_CONNTRACK
+
+          # ============================================
+          # 7. IPVS（负载均衡）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e IP_VS \
+            -e IP_VS_PROTO_TCP \
+            -e IP_VS_PROTO_UDP \
+            -e IP_VS_PROTO_SCTP \
+            -e IP_VS_PROTO_AH \
+            -e IP_VS_PROTO_ESP \
+            -e IP_VS_RR \
+            -e IP_VS_WRR \
+            -e IP_VS_LC \
+            -e IP_VS_WLC \
+            -e IP_VS_FO \
+            -e IP_VS_OVF \
+            -e IP_VS_LBLC \
+            -e IP_VS_LBLCR \
+            -e IP_VS_DH \
+            -e IP_VS_SH \
+            -e IP_VS_SED \
+            -e IP_VS_NQ \
+            -e IP_VS_NFCT
+
+          # ============================================
+          # 8. OverlayFS + 存储驱动
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e OVERLAY_FS \
+            -e OVERLAY_FS_REDIRECT_DIR \
+            -e OVERLAY_FS_INDEX
+
+          # ============================================
+          # 9. 文件系统（LXC / Docker 镜像解压需要）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e SQUASHFS \
+            -e SQUASHFS_XZ \
+            -e SQUASHFS_LZ4 \
+            -e SQUASHFS_ZSTD \
+            -e EXT4_FS \
+            -e FUSE_FS \
+            -e TMPFS \
+            -e BLK_DEV_LOOP \
+            -e BLK_DEV_NBD
+
+          # ============================================
+          # 10. Netlink / 网络命名空间
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NETLINK_DIAG \
+            -e INET_DIAG \
+            -e PACKET_DIAG \
+            -e UNIX_DIAG
+
+          # ============================================
+          # 11. Seccomp / BPF
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e SECCOMP \
+            -e SECCOMP_FILTER \
+            -e BPF_SYSCALL \
+            -e NET_SCHED \
+            -e NET_CLS_ACT \
+            -e NET_CLS_BPF \
+            -e NET_ACT_BPF
+
+          # ============================================
+          # 12. TUN/TAP（VPN 容器需要）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e TUN \
+            -e TAP
+
+          # ============================================
+          # 13. veth 相关
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NET_IPIP \
+            -e NET_IPGRE \
+            -e NET_IPGRE_DEMUX
 
           make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
+          echo ""
           echo "===== Container config check ====="
-          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS)=" \
+          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" \
             out/.config || true
 
           echo ""
-          echo "===== IPC_NS 依赖状态 ====="
-          grep -E "CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS)" out/.config || true
+          echo "===== Netfilter 关键项（应该是 =y）====="
+          grep -E "^CONFIG_(NETFILTER_XT_MATCH_ADDRTYPE|NETFILTER_XT_MATCH_CONNTRACK|NETFILTER_XT_MATCH_IPVS|NETFILTER_XT_TARGET_MASQUERADE|NETFILTER_XT_TARGET_REDIRECT|NETFILTER_XT_TARGET_MARK|NETFILTER_XT_MATCH_COMMENT|IP_NF_IPTABLES|IP_NF_NAT|IP_NF_FILTER|IP_NF_MANGLE|IP_NF_RAW|NF_NAT|NF_CONNTRACK|NETFILTER_ADVANCED|NETFILTER_XTABLES)" \
+            out/.config || true
+
+          echo ""
+          echo "===== IPVS 协议（应该都是 =y）====="
+          grep -E "^CONFIG_IP_VS" out/.config || true
+
+          echo ""
+          echo "===== 仍然为 =m 的 netfilter 项（应该为空或极少）====="
+          grep -E "^CONFIG_NETFILTER.*=m$" out/.config || true
 
       # ============ 7. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
@@ -246,7 +380,7 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 8. 编译内核（ccache 加速） ============
+      # ============ 8. 编译内核 ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
@@ -258,7 +392,6 @@ jobs:
 
           echo "===== Build 开始 ====="
           echo "时间: $(date)"
-          echo "ccache 状态（build 前）:"
           ccache -s
 
           START_TIME=$(date +%s)
@@ -277,7 +410,6 @@ jobs:
           echo ""
           echo "===== Build 结束 ====="
           echo "耗时: ${DURATION} 秒 ($((DURATION/60)) 分钟)"
-          echo "ccache 状态（build 后）:"
           ccache -s
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
@@ -289,30 +421,27 @@ jobs:
           echo "===== New kernel image ====="
           ls -lh out/arch/arm64/boot/Image.gz
 
-      # ============ 8.5 展示 ccache 统计 ============
+          echo "===== 生成的模块列表 ====="
+          find out -name "*.ko" | head -30 || true
+          echo "模块总数: $(find out -name '*.ko' | wc -l)"
+
+      # ============ 8.5 ccache 统计 ============
       - name: Show ccache stats after build
         if: always()
         run: |
           echo "===== 最终 ccache 统计 ====="
           ccache -s -v
-          echo ""
-          echo "===== 缓存目录大小 ====="
           du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
 
-      # ============ 9. 下载 LineageOS 官方 mkbootimg 工具 ============
+      # ============ 9. 下载 mkbootimg 工具 ============
       - name: Fetch LineageOS mkbootimg tools
         run: |
           git clone --depth=1 -b lineage-22.2 \
             https://github.com/LineageOS/android_system_tools_mkbootimg \
             /tmp/lineage-mkbootimg
-
-          echo "===== Available tools ====="
           ls -la /tmp/lineage-mkbootimg/*.py
 
-          echo "===== mkbootimg.py --help ====="
-          python3 /tmp/lineage-mkbootimg/mkbootimg.py --help | head -60 || true
-
-      # ============ 10. 解包原 boot.img + 替换 kernel + 重打包 + 补齐 ============
+      # ============ 10. 重打包 boot.img ============
       - name: Repack boot.img with new kernel
         shell: bash
         run: |
@@ -326,19 +455,11 @@ jobs:
           rm -rf "$WORK"
           mkdir -p "$WORK"
 
-          echo "======================================"
-          echo "===== Step 1: Unpack boot.img ====="
-          echo "======================================"
           UNPACK_OUT=$(python3 "$TOOLS/unpack_bootimg.py" \
             --boot_img "$BOOT_SRC" \
             --out "$WORK" 2>&1 | tee /dev/stderr)
 
-          echo "===== Unpacked files ====="
           ls -la "$WORK/"
-
-          echo "======================================"
-          echo "===== Step 2: Dynamically parse params ====="
-          echo "======================================"
 
           HEADER_VERSION=$(echo "$UNPACK_OUT" | grep -i "boot image header version" | awk -F: '{print $2}' | tr -d ' ')
           KERNEL_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "kernel load address"        | awk -F: '{print $2}' | tr -d ' ')
@@ -354,28 +475,8 @@ jobs:
 
           BASE="0x00000000"
 
-          echo "BASE           = $BASE"
-          echo "HEADER_VERSION = $HEADER_VERSION"
-          echo "KERNEL_OFFSET  = $KERNEL_OFFSET"
-          echo "RAMDISK_OFFSET = $RAMDISK_OFFSET"
-          echo "SECOND_OFFSET  = $SECOND_OFFSET"
-          echo "TAGS_OFFSET    = $TAGS_OFFSET"
-          echo "DTB_OFFSET     = $DTB_OFFSET"
-          echo "PAGESIZE       = $PAGESIZE"
-          echo "OS_VERSION     = $OS_VERSION"
-          echo "OS_PATCH_LEVEL = $OS_PATCH_LEVEL"
-          echo "CMDLINE        = $CMDLINE"
-          echo "PRODUCT_NAME   = $PRODUCT_NAME"
-
-          echo "======================================"
-          echo "===== Step 3: Replace kernel ====="
-          echo "======================================"
           cp "$KERNEL_NEW" "$WORK/kernel"
-          ls -lh "$WORK/kernel"
 
-          echo "======================================"
-          echo "===== Step 4: Build mkbootimg args ====="
-          echo "======================================"
           ARGS=(
             --header_version "$HEADER_VERSION"
             --kernel "$WORK/kernel"
@@ -389,92 +490,36 @@ jobs:
           )
 
           DTB_SIZE=$(stat -c%s "$WORK/dtb" 2>/dev/null || echo 0)
-          echo "DTB size: $DTB_SIZE bytes"
           if [ "$DTB_SIZE" -gt 0 ]; then
             ARGS+=(--dtb "$WORK/dtb" --dtb_offset "$DTB_OFFSET")
-          else
-            echo "DTB is empty, skipping --dtb"
           fi
 
-          if [ -n "$CMDLINE" ]; then
-            ARGS+=(--cmdline "$CMDLINE")
-          fi
+          [ -n "$CMDLINE" ] && ARGS+=(--cmdline "$CMDLINE")
+          [ -n "$OS_VERSION" ] && ARGS+=(--os_version "$OS_VERSION")
+          [ -n "$OS_PATCH_LEVEL" ] && ARGS+=(--os_patch_level "$OS_PATCH_LEVEL")
+          [ -n "$PRODUCT_NAME" ] && ARGS+=(--board "$PRODUCT_NAME")
 
-          if [ -n "$OS_VERSION" ]; then
-            ARGS+=(--os_version "$OS_VERSION")
-          fi
-          if [ -n "$OS_PATCH_LEVEL" ]; then
-            ARGS+=(--os_patch_level "$OS_PATCH_LEVEL")
-          fi
-
-          if [ -n "$PRODUCT_NAME" ]; then
-            ARGS+=(--board "$PRODUCT_NAME")
-          fi
-
-          echo "===== ARGS ====="
-          printf '%s\n' "${ARGS[@]}"
-
-          echo "======================================"
-          echo "===== Step 5: Repack boot.img ====="
-          echo "======================================"
           python3 "$TOOLS/mkbootimg.py" "${ARGS[@]}" --output "$BOOT_OUT"
 
-          echo "======================================"
-          echo "===== Step 6: Verify output ====="
-          echo "======================================"
           ls -lh "$BOOT_OUT"
-          file "$BOOT_OUT" || true
 
-          echo "===== Re-unpack to verify ====="
-          rm -rf /tmp/boot-verify
-          python3 "$TOOLS/unpack_bootimg.py" \
-            --boot_img "$BOOT_OUT" \
-            --out /tmp/boot-verify
-          echo "===== New boot.img contents ====="
-          ls -la /tmp/boot-verify/
-
-          echo "======================================"
-          echo "===== Step 7: Pad to original size ====="
-          echo "======================================"
+          # 补齐到原分区大小
           ORIG_SIZE=$(stat -c%s "$BOOT_SRC")
           NEW_SIZE=$(stat -c%s "$BOOT_OUT")
-          echo "Original boot.img size: $ORIG_SIZE bytes ($((ORIG_SIZE/1024/1024)) MB)"
-          echo "New boot.img size:      $NEW_SIZE bytes ($((NEW_SIZE/1024/1024)) MB)"
-          echo "Difference:             $((ORIG_SIZE - NEW_SIZE)) bytes"
+          echo "Original: $ORIG_SIZE  New: $NEW_SIZE"
 
           if [ "$NEW_SIZE" -lt "$ORIG_SIZE" ]; then
-            echo "Padding new img to match original size..."
-            echo "Method: copy original, overwrite front with new content"
-
             PADDED="/tmp/boot-padded.img"
             cp "$BOOT_SRC" "$PADDED"
             dd if="$BOOT_OUT" of="$PADDED" conv=notrunc bs=1M status=progress
-
-            PADDED_SIZE=$(stat -c%s "$PADDED")
-            echo "Padded size: $PADDED_SIZE bytes"
-
             mv "$PADDED" "$BOOT_OUT"
-            echo "Final size: $(stat -c%s "$BOOT_OUT") bytes"
-
-            echo "===== Verify padded boot.img is still valid ====="
-            rm -rf /tmp/boot-verify
-            python3 "$TOOLS/unpack_bootimg.py" \
-              --boot_img "$BOOT_OUT" \
-              --out /tmp/boot-verify 2>&1 | grep -iE "kernel_size|ramdisk size|dtb size|header version" || true
-            echo "===== Padded boot.img unpacked ====="
-            ls -la /tmp/boot-verify/
-          else
-            echo "New img is already >= original size, no padding needed"
+            echo "Padded to: $(stat -c%s "$BOOT_OUT")"
           fi
 
-          echo "======================================"
-          echo "===== Final Summary ====="
-          echo "======================================"
-          echo "Output: $BOOT_OUT"
-          echo "Size:   $(stat -c%s "$BOOT_OUT") bytes"
+          echo "===== Final ====="
           ls -lh "$BOOT_OUT"
 
-      # ============ 11. 上传新 boot.img ============
+      # ============ 11. 上传 boot.img ============
       - name: Upload new boot.img
         if: success()
         uses: actions/upload-artifact@v4
@@ -483,7 +528,7 @@ jobs:
           path: ${{ github.workspace }}/boot-flashlmdd-container.img
           retention-days: 7
 
-      # ============ 12. 上传编译日志 ============
+      # ============ 12. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
