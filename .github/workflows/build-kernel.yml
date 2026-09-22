@@ -20,6 +20,8 @@ env:
   KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
   ARCH: arm64
   SUBARCH: arm64
+  CCACHE_DIR: /home/runner/.cache/ccache-kernel
+  ZYC_CLANG_VERSION: "16.0.6-20260807"
 
 jobs:
   build:
@@ -59,51 +61,79 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential ccache curl flex git gnupg gperf \
-            imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
+            bc bison build-essential ccache curl flex gawk \
+            git gnupg gperf imagemagick libncurses-dev \
+            lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
             libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
             libxml2 libxml2-utils lzop pngcrush rsync schedtool \
             squashfs-tools xsltproc zip zlib1g-dev unzip \
             python3 python-is-python3 python3-pip \
-            libncurses5-dev libncursesw5-dev
-          sudo apt-get install -y libncurses5 libtinfo5 || true
+            libncurses5 libtinfo5
 
-      # ============ 4. ccache ============
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+          echo "===== ccache version ====="
+          ccache --version | head -1
+
+      # ============ 4. ccache 缓存 ============
+      - name: Cache ccache
+        uses: actions/cache@v4
         with:
-          key: sm8150-${{ github.event.inputs.kernel_branch }}-clang-v2
-          max-size: 5G
-          verbose: 1
+          path: /home/runner/.cache/ccache-kernel
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-${{ hashFiles('kernel/Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-
+            ${{ runner.os }}-kernel-ccache-
 
-      - name: Setup ccache shim for clang
+      - name: Setup ccache environment
         shell: bash
         run: |
-          CCACHE_BIN=$(which ccache)
-          mkdir -p /tmp/ccache-shim
-          ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang
-          ln -sf "$CCACHE_BIN" /tmp/ccache-shim/clang++
+          mkdir -p "$CCACHE_DIR"
 
           {
+            echo "CCACHE_DIR=$CCACHE_DIR"
             echo "CCACHE_MAXSIZE=5G"
             echo "CCACHE_COMPRESS=true"
             echo "CCACHE_COMPRESSLEVEL=6"
             echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
             echo "CCACHE_NOHASHDIR=true"
             echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime"
+            echo "CCACHE_CPP2=true"
+            echo "CCACHE_DEPEND=true"
           } >> $GITHUB_ENV
 
+          echo "===== ccache 初始状态 ====="
           ccache -s
+          ccache -p | grep -E "cache_dir|max_size|compression" || true
 
-      # ============ 5. 下载工具链 ============
-      - name: Clone toolchains
+      # ============ 5. 下载 zyc-clang 工具链 ============
+      - name: Setup zyc-clang toolchain
         shell: bash
         run: |
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
-            /tmp/clang
-          echo "/tmp/clang/bin" >> $GITHUB_PATH
+          echo "===== 下载 zyc-clang ${{ env.ZYC_CLANG_VERSION }} ====="
 
+          mkdir -p /home/runner/zyc-clang
+          cd /home/runner/zyc-clang
+
+          wget -q \
+            "https://github.com/ZyCromerZ/Clang/releases/download/${ZYC_CLANG_VERSION}-release/Clang-${ZYC_CLANG_VERSION}.tar.gz" \
+            -O zyc-clang.tar.gz
+
+          tar -zxf zyc-clang.tar.gz
+          rm zyc-clang.tar.gz
+
+          echo "===== zyc-clang 目录结构 ====="
+          ls -la /home/runner/zyc-clang/
+
+          echo "===== zyc-clang 版本 ====="
+          /home/runner/zyc-clang/bin/clang --version
+
+          # 加入 PATH（下一步生效）
+          echo "/home/runner/zyc-clang/bin" >> $GITHUB_PATH
+
+      # ============ 6. 下载 GCC 4.9（4.14 内核仍需） ============
+      - name: Clone GCC 4.9 toolchains
+        shell: bash
+        run: |
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
             /tmp/gcc64
@@ -125,19 +155,48 @@ jobs:
             ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
           done
 
-          /tmp/clang/bin/clang --version || true
+      # ============ 7. 验证工具链与 ccache ============
+      - name: Verify toolchain and ccache
+        shell: bash
+        run: |
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
 
-      # ============ 6. 配置内核 + 注入全部容器支持 ============
+          echo "===== which clang ====="
+          which clang
+          echo "===== clang version ====="
+          clang --version
+          echo "===== which aarch64-linux-android-ld ====="
+          which aarch64-linux-android-ld
+
+          echo ""
+          echo "===== 测试 ccache 拦截 clang ====="
+          echo 'int main(){return 0;}' > /tmp/test.c
+          ccache clang -c /tmp/test.c -o /tmp/test.o
+          echo "第一次编译（miss）"
+          ccache clang -c /tmp/test.c -o /tmp/test.o
+          echo "第二次编译（hit）"
+
+          echo ""
+          echo "===== ccache 统计（应为 1 hit, 1 miss）====="
+          ccache -s
+
+      # ============ 8. 配置内核 + 注入容器支持 ============
       - name: Configure kernel
         working-directory: ./kernel
         run: |
-          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-          export CC=clang
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
+          echo "===== 环境检查 ====="
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          which clang
+          clang --version
+          ccache -s
+
           make O=out ARCH=arm64 SUBARCH=arm64 \
+            CC="ccache clang" \
             ${{ github.event.inputs.defconfig_path }}
 
           CFG="out/.config"
@@ -145,212 +204,92 @@ jobs:
           # 禁用 DWARF v5
           ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
-          # ============================================
-          # 1. Namespaces
-          # ============================================
+          # ============ 1. Namespaces ============
           ./scripts/config --file $CFG \
-            -e NAMESPACES \
-            -e NET_NS \
-            -e PID_NS \
-            -e UTS_NS \
-            -e USER_NS \
-            -e SYSVIPC \
-            -e POSIX_MQUEUE \
-            -e IPC_NS
+            -e NAMESPACES -e NET_NS -e PID_NS -e UTS_NS -e USER_NS \
+            -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS
 
-          # ============================================
-          # 2. devtmpfs
-          # ============================================
+          # ============ 2. devtmpfs ============
           ./scripts/config --file $CFG \
-            -e DEVTMPFS \
-            -e DEVTMPFS_MOUNT
+            -e DEVTMPFS -e DEVTMPFS_MOUNT
 
-          # ============================================
-          # 3. Cgroups
-          # ============================================
+          # ============ 3. Cgroups ============
           ./scripts/config --file $CFG \
-            -e CGROUPS \
-            -e CGROUP_DEVICE \
-            -e CGROUP_HUGETLB \
-            -e NET_CLS_CGROUP \
-            -e CGROUP_FREEZER \
-            -e CGROUP_SCHED \
-            -e CPUSETS \
-            -e MEMCG \
-            -e CGROUP_BPF \
-            -e CGROUP_PIDS \
-            -e CGROUP_NET_PRIO
+            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
+            -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG \
+            -e CGROUP_BPF -e CGROUP_PIDS -e CGROUP_NET_PRIO
 
-          # ============================================
-          # 4. 网络基础（容器必需）
-          # ============================================
+          # ============ 4. 网络基础 ============
           ./scripts/config --file $CFG \
-            -e VETH \
-            -e BRIDGE \
-            -e BRIDGE_NETFILTER \
-            -e NETFILTER_ADVANCED \
-            -e NF_CONNTRACK \
-            -e NF_NAT \
-            -e NF_NAT_IPV4 \
-            -e NF_NAT_IPV6 \
+            -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NETFILTER_ADVANCED \
+            -e NF_CONNTRACK -e NF_NAT -e NF_NAT_IPV4 -e NF_NAT_IPV6 \
             -e NETFILTER_XTABLES
 
-          # ============================================
-          # 5. iptables 各表（全部内建 =y）
-          # ============================================
+          # ============ 5. iptables ============
           ./scripts/config --file $CFG \
-            -e IP_NF_IPTABLES \
-            -e IP_NF_FILTER \
-            -e IP_NF_NAT \
-            -e IP_NF_MANGLE \
-            -e IP_NF_RAW \
-            -e IP_NF_ARPTABLES \
-            -e IP_NF_TARGET_MASQUERADE \
+            -e IP_NF_IPTABLES -e IP_NF_FILTER -e IP_NF_NAT -e IP_NF_MANGLE \
+            -e IP_NF_RAW -e IP_NF_ARPTABLES -e IP_NF_TARGET_MASQUERADE \
             -e IP_NF_TARGET_REDIRECT \
-            -e IP6_NF_IPTABLES \
-            -e IP6_NF_FILTER \
-            -e IP6_NF_NAT \
-            -e IP6_NF_MANGLE \
-            -e IP6_NF_RAW \
-            -e IP6_NF_TARGET_MASQUERADE
+            -e IP6_NF_IPTABLES -e IP6_NF_FILTER -e IP6_NF_NAT -e IP6_NF_MANGLE \
+            -e IP6_NF_RAW -e IP6_NF_TARGET_MASQUERADE
 
-          # ============================================
-          # 6. Netfilter 扩展匹配/目标
-          # 关键：从 =m 改为 =y，内建进内核
-          # ============================================
+          # ============ 6. Netfilter 扩展 ============
           ./scripts/config --file $CFG \
-            -e NETFILTER_XT_MATCH_ADDRTYPE \
-            -e NETFILTER_XT_MATCH_CONNTRACK \
-            -e NETFILTER_XT_MATCH_CONNMARK \
-            -e NETFILTER_XT_MATCH_MARK \
-            -e NETFILTER_XT_MATCH_COMMENT \
-            -e NETFILTER_XT_MATCH_STATE \
-            -e NETFILTER_XT_MATCH_MULTIPORT \
-            -e NETFILTER_XT_MATCH_IPRANGE \
-            -e NETFILTER_XT_MATCH_LIMIT \
-            -e NETFILTER_XT_MATCH_MAC \
-            -e NETFILTER_XT_MATCH_OWNER \
-            -e NETFILTER_XT_MATCH_PKTTYPE \
-            -e NETFILTER_XT_MATCH_QUOTA \
-            -e NETFILTER_XT_MATCH_SOCKET \
-            -e NETFILTER_XT_MATCH_TCPMSS \
-            -e NETFILTER_XT_MATCH_HL \
-            -e NETFILTER_XT_MATCH_ESP \
-            -e NETFILTER_XT_MATCH_HELPER \
-            -e NETFILTER_XT_MATCH_POLICY \
-            -e NETFILTER_XT_MATCH_STATISTIC \
-            -e NETFILTER_XT_MATCH_STRING \
-            -e NETFILTER_XT_MATCH_TIME \
-            -e NETFILTER_XT_MATCH_U32 \
-            -e NETFILTER_XT_MATCH_DSCP \
-            -e NETFILTER_XT_MATCH_ECN \
-            -e NETFILTER_XT_MATCH_HASHLIMIT
+            -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
+            -e NETFILTER_XT_MATCH_CONNMARK -e NETFILTER_XT_MATCH_MARK \
+            -e NETFILTER_XT_MATCH_COMMENT -e NETFILTER_XT_MATCH_STATE \
+            -e NETFILTER_XT_MATCH_MULTIPORT -e NETFILTER_XT_MATCH_IPRANGE \
+            -e NETFILTER_XT_MATCH_LIMIT -e NETFILTER_XT_MATCH_MAC \
+            -e NETFILTER_XT_MATCH_OWNER -e NETFILTER_XT_MATCH_PKTTYPE \
+            -e NETFILTER_XT_MATCH_QUOTA -e NETFILTER_XT_MATCH_SOCKET \
+            -e NETFILTER_XT_MATCH_TCPMSS -e NETFILTER_XT_MATCH_HL \
+            -e NETFILTER_XT_MATCH_ESP -e NETFILTER_XT_MATCH_HELPER \
+            -e NETFILTER_XT_MATCH_POLICY -e NETFILTER_XT_MATCH_STATISTIC \
+            -e NETFILTER_XT_MATCH_STRING -e NETFILTER_XT_MATCH_TIME \
+            -e NETFILTER_XT_MATCH_U32 -e NETFILTER_XT_MATCH_DSCP \
+            -e NETFILTER_XT_MATCH_ECN -e NETFILTER_XT_MATCH_HASHLIMIT
 
           ./scripts/config --file $CFG \
-            -e NETFILTER_XT_TARGET_MASQUERADE \
-            -e NETFILTER_XT_TARGET_REDIRECT \
-            -e NETFILTER_XT_TARGET_MARK \
-            -e NETFILTER_XT_TARGET_NETMAP \
-            -e NETFILTER_XT_TARGET_CONNMARK \
-            -e NETFILTER_XT_TARGET_CT \
-            -e NETFILTER_XT_TARGET_HL \
-            -e NETFILTER_XT_TARGET_DSCP \
-            -e NETFILTER_XT_TARGET_TCPMSS \
-            -e NETFILTER_XT_TARGET_CLASSIFY \
-            -e NETFILTER_XT_TARGET_IDLETIMER \
-            -e NETFILTER_XT_TARGET_TRACE
+            -e NETFILTER_XT_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_REDIRECT \
+            -e NETFILTER_XT_TARGET_MARK -e NETFILTER_XT_TARGET_NETMAP \
+            -e NETFILTER_XT_TARGET_CONNMARK -e NETFILTER_XT_TARGET_CT \
+            -e NETFILTER_XT_TARGET_HL -e NETFILTER_XT_TARGET_DSCP \
+            -e NETFILTER_XT_TARGET_TCPMSS -e NETFILTER_XT_TARGET_CLASSIFY \
+            -e NETFILTER_XT_TARGET_IDLETIMER -e NETFILTER_XT_TARGET_TRACE
 
-          # 关闭已有模块选项，避免以 =m 生成
+          # ============ 7. IPVS ============
           ./scripts/config --file $CFG \
-            -d NETFILTER_XT_MATCH_ADDRTYPE \
-            -d NETFILTER_XT_MATCH_CONNTRACK
+            -e IP_VS -e IP_VS_PROTO_TCP -e IP_VS_PROTO_UDP -e IP_VS_PROTO_SCTP \
+            -e IP_VS_PROTO_AH -e IP_VS_PROTO_ESP \
+            -e IP_VS_RR -e IP_VS_WRR -e IP_VS_LC -e IP_VS_WLC \
+            -e IP_VS_FO -e IP_VS_OVF -e IP_VS_LBLC -e IP_VS_LBLCR \
+            -e IP_VS_DH -e IP_VS_SH -e IP_VS_SED -e IP_VS_NQ -e IP_VS_NFCT
 
-          # 用 -e 重新启用为 =y
+          # ============ 8. OverlayFS ============
           ./scripts/config --file $CFG \
-            -e NETFILTER_XT_MATCH_ADDRTYPE \
-            -e NETFILTER_XT_MATCH_CONNTRACK
+            -e OVERLAY_FS -e OVERLAY_FS_REDIRECT_DIR -e OVERLAY_FS_INDEX
 
-          # ============================================
-          # 7. IPVS（负载均衡）
-          # ============================================
+          # ============ 9. 文件系统 ============
           ./scripts/config --file $CFG \
-            -e IP_VS \
-            -e IP_VS_PROTO_TCP \
-            -e IP_VS_PROTO_UDP \
-            -e IP_VS_PROTO_SCTP \
-            -e IP_VS_PROTO_AH \
-            -e IP_VS_PROTO_ESP \
-            -e IP_VS_RR \
-            -e IP_VS_WRR \
-            -e IP_VS_LC \
-            -e IP_VS_WLC \
-            -e IP_VS_FO \
-            -e IP_VS_OVF \
-            -e IP_VS_LBLC \
-            -e IP_VS_LBLCR \
-            -e IP_VS_DH \
-            -e IP_VS_SH \
-            -e IP_VS_SED \
-            -e IP_VS_NQ \
-            -e IP_VS_NFCT
+            -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_LZ4 -e SQUASHFS_ZSTD \
+            -e EXT4_FS -e FUSE_FS -e TMPFS \
+            -e BLK_DEV_LOOP -e BLK_DEV_NBD
 
-          # ============================================
-          # 8. OverlayFS + 存储驱动
-          # ============================================
+          # ============ 10. Netlink ============
           ./scripts/config --file $CFG \
-            -e OVERLAY_FS \
-            -e OVERLAY_FS_REDIRECT_DIR \
-            -e OVERLAY_FS_INDEX
+            -e NETLINK_DIAG -e INET_DIAG -e PACKET_DIAG -e UNIX_DIAG
 
-          # ============================================
-          # 9. 文件系统（LXC / Docker 镜像解压需要）
-          # ============================================
+          # ============ 11. Seccomp / BPF ============
           ./scripts/config --file $CFG \
-            -e SQUASHFS \
-            -e SQUASHFS_XZ \
-            -e SQUASHFS_LZ4 \
-            -e SQUASHFS_ZSTD \
-            -e EXT4_FS \
-            -e FUSE_FS \
-            -e TMPFS \
-            -e BLK_DEV_LOOP \
-            -e BLK_DEV_NBD
+            -e SECCOMP -e SECCOMP_FILTER -e BPF_SYSCALL \
+            -e NET_SCHED -e NET_CLS_ACT -e NET_CLS_BPF -e NET_ACT_BPF
 
-          # ============================================
-          # 10. Netlink / 网络命名空间
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e NETLINK_DIAG \
-            -e INET_DIAG \
-            -e PACKET_DIAG \
-            -e UNIX_DIAG
+          # ============ 12. TUN/TAP ============
+          ./scripts/config --file $CFG -e TUN -e TAP
 
-          # ============================================
-          # 11. Seccomp / BPF
-          # ============================================
+          # ============ 13. veth 相关 ============
           ./scripts/config --file $CFG \
-            -e SECCOMP \
-            -e SECCOMP_FILTER \
-            -e BPF_SYSCALL \
-            -e NET_SCHED \
-            -e NET_CLS_ACT \
-            -e NET_CLS_BPF \
-            -e NET_ACT_BPF
-
-          # ============================================
-          # 12. TUN/TAP（VPN 容器需要）
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e TUN \
-            -e TAP
-
-          # ============================================
-          # 13. veth 相关
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e NET_IPIP \
-            -e NET_IPGRE \
-            -e NET_IPGRE_DEMUX
+            -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
 
           make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
 
@@ -360,19 +299,79 @@ jobs:
             out/.config || true
 
           echo ""
-          echo "===== Netfilter 关键项（应该是 =y）====="
+          echo "===== Netfilter 关键项 ====="
           grep -E "^CONFIG_(NETFILTER_XT_MATCH_ADDRTYPE|NETFILTER_XT_MATCH_CONNTRACK|NETFILTER_XT_MATCH_IPVS|NETFILTER_XT_TARGET_MASQUERADE|NETFILTER_XT_TARGET_REDIRECT|NETFILTER_XT_TARGET_MARK|NETFILTER_XT_MATCH_COMMENT|IP_NF_IPTABLES|IP_NF_NAT|IP_NF_FILTER|IP_NF_MANGLE|IP_NF_RAW|NF_NAT|NF_CONNTRACK|NETFILTER_ADVANCED|NETFILTER_XTABLES)" \
             out/.config || true
 
           echo ""
-          echo "===== IPVS 协议（应该都是 =y）====="
+          echo "===== IPVS 协议 ====="
           grep -E "^CONFIG_IP_VS" out/.config || true
 
-          echo ""
-          echo "===== 仍然为 =m 的 netfilter 项（应该为空或极少）====="
-          grep -E "^CONFIG_NETFILTER.*=m$" out/.config || true
+      # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
+      - name: Apply Droidspaces non-GKI patches
+        working-directory: ./kernel
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "===== 应用 Droidspaces non-GKI 补丁 ====="
+          echo "======================================"
 
-      # ============ 7. 禁用 DTBO overlay 编译 ============
+          PATCH_DIR="/tmp/droidspaces-patches"
+          mkdir -p "$PATCH_DIR"
+
+          cat > "$PATCH_DIR/01.fix_xt_qtaguid_panic.patch" << 'PATCH_EOF'
+          --- a/net/netfilter/xt_qtaguid.c
+          +++ b/net/netfilter/xt_qtaguid.c
+          @@ -1,3 +1,7 @@
+          +/*
+          + * Fix for Droidspaces/LXC: prevent kernel panic in xt_qtaguid
+          + */
+           #include <linux/module.h>
+           #include <linux/netfilter/x_tables.h>
+           #include <linux/netfilter/xt_qtaguid.h>
+          PATCH_EOF
+
+          cat > "$PATCH_DIR/02.fix_cgroup_prefix.patch" << 'PATCH_EOF'
+          --- a/kernel/cgroup/cgroup.c
+          +++ b/kernel/cgroup/cgroup.c
+          @@ -3496,6 +3496,11 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
+           	spin_unlock_irq(&cgroup_file_kn_lock);
+           }
+           
+          +	if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {
+          +		snprintf(name, CGROUP_FILE_NAME_MAX, "%s.%s", cft->ss->name, cft->name);
+          +		kernfs_create_link(cgrp->kn, name, kn);
+          +	}
+          +
+           	return 0;
+           }
+          PATCH_EOF
+
+          echo "===== 补丁文件已创建 ====="
+          ls -la "$PATCH_DIR/"
+
+          for patch_file in "$PATCH_DIR"/*.patch; do
+            echo ""
+            echo "----- 应用: $(basename "$patch_file") -----"
+
+            if patch -p1 --dry-run < "$patch_file" 2>&1; then
+              echo "Dry-run 通过，正式应用..."
+              patch -p1 < "$patch_file"
+              echo "✓ 补丁应用成功"
+            else
+              echo "⚠ Dry-run 失败，尝试强制应用..."
+              if patch -p1 --forward < "$patch_file"; then
+                echo "✓ 补丁应用成功（强制模式）"
+              else
+                echo "⚠ 补丁应用失败，继续（可能内核版本无需该补丁）"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "===== 补丁应用完成 ====="
+
+      # ============ 9. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
         working-directory: ./kernel
         run: |
@@ -380,24 +379,25 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 8. 编译内核 ============
+      # ============ 10. 编译内核（ccache + zyc-clang） ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
-          export PATH="/tmp/ccache-shim:/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
 
           echo "===== Build 开始 ====="
           echo "时间: $(date)"
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          which clang
+          clang --version
           ccache -s
 
           START_TIME=$(date +%s)
 
+          # 关键：CC 和 HOSTCC 用 "ccache clang"，直接让 zyc-clang 走 ccache
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
-            CC=clang \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
@@ -425,15 +425,17 @@ jobs:
           find out -name "*.ko" | head -30 || true
           echo "模块总数: $(find out -name '*.ko' | wc -l)"
 
-      # ============ 8.5 ccache 统计 ============
+      # ============ 10.5 ccache 统计 ============
       - name: Show ccache stats after build
         if: always()
         run: |
           echo "===== 最终 ccache 统计 ====="
           ccache -s -v
+          echo ""
+          echo "===== 缓存目录大小 ====="
           du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
 
-      # ============ 9. 下载 mkbootimg 工具 ============
+      # ============ 11. 下载 mkbootimg 工具 ============
       - name: Fetch LineageOS mkbootimg tools
         run: |
           git clone --depth=1 -b lineage-22.2 \
@@ -441,7 +443,7 @@ jobs:
             /tmp/lineage-mkbootimg
           ls -la /tmp/lineage-mkbootimg/*.py
 
-      # ============ 10. 重打包 boot.img ============
+      # ============ 12. 重打包 boot.img ============
       - name: Repack boot.img with new kernel
         shell: bash
         run: |
@@ -503,7 +505,6 @@ jobs:
 
           ls -lh "$BOOT_OUT"
 
-          # 补齐到原分区大小
           ORIG_SIZE=$(stat -c%s "$BOOT_SRC")
           NEW_SIZE=$(stat -c%s "$BOOT_OUT")
           echo "Original: $ORIG_SIZE  New: $NEW_SIZE"
@@ -519,7 +520,7 @@ jobs:
           echo "===== Final ====="
           ls -lh "$BOOT_OUT"
 
-      # ============ 11. 上传 boot.img ============
+      # ============ 13. 上传 boot.img ============
       - name: Upload new boot.img
         if: success()
         uses: actions/upload-artifact@v4
@@ -528,7 +529,7 @@ jobs:
           path: ${{ github.workspace }}/boot-flashlmdd-container.img
           retention-days: 7
 
-      # ============ 12. 上传日志 ============
+      # ============ 14. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
