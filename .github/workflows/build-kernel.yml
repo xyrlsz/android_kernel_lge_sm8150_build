@@ -1,4 +1,4 @@
-name: Build Container-Supported Kernel (LG V50) + APatch + boot.img Repack
+name: Build Container-Supported Kernel (LG V50) + boot.img Repack
 
 on:
   workflow_dispatch:
@@ -15,10 +15,6 @@ on:
         description: "Path to prebuilt boot.img in this repo"
         required: true
         default: "prebuilt/boot.img"
-      apatch_superkey:
-        description: "SuperKey for APatch (letters and numbers only, min 8 chars)"
-        required: true
-        default: "Apatch12345678"
 
 env:
   KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
@@ -82,7 +78,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-apatch-v2-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-patch-v4-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
@@ -142,30 +138,7 @@ jobs:
             ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
           done
 
-      # ============ 7. 下载并构建 KernelPatch 工具 ============
-      - name: Download and build KernelPatch tools
-        shell: bash
-        run: |
-          mkdir -p /tmp/kpatch
-          cd /tmp/kpatch
-
-          # 优先下载 Linux x86_64 预编译版
-          if wget -q --spider "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-linux" 2>/dev/null; then
-            wget -q "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-linux" -O kptools
-            echo "下载 kptools-linux 预编译版成功"
-          else
-            echo "kptools-linux 不存在，从源码编译"
-            git clone --depth=1 https://github.com/bmax121/KernelPatch /tmp/KernelPatch
-            cd /tmp/KernelPatch
-            make -C tools
-            cp tools/kptools /tmp/kpatch/
-          fi
-
-          chmod +x /tmp/kpatch/kptools
-          file /tmp/kpatch/kptools
-          /tmp/kpatch/kptools -h || true
-
-      # ============ 8. 验证工具链 ============
+      # ============ 7. 验证工具链 ============
       - name: Verify toolchain
         shell: bash
         run: |
@@ -175,7 +148,7 @@ jobs:
           which aarch64-linux-android-ld
           which arm-linux-androideabi-ld
 
-      # ============ 9. 配置内核 ============
+      # ============ 8. 配置内核 ============
       - name: Configure kernel
         working-directory: ./kernel
         run: |
@@ -291,16 +264,6 @@ jobs:
           ./scripts/config --file $CFG \
             -e FW_LOADER -e FW_LOADER_USER_HELPER -e FW_LOADER_COMPRESS
 
-          # ============================================
-          # 10. APatch 必需配置
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e IKCONFIG -e IKCONFIG_PROC \
-            -e KALLSYMS -e KALLSYMS_ALL -e KALLSYMS_EXTRA_PASS \
-            -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_UNLOAD \
-            -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS \
-            -e FUNCTION_TRACER -e DYNAMIC_FTRACE -e FTRACE
-
           # 自动处理依赖
           make O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
@@ -310,28 +273,81 @@ jobs:
 
           echo ""
           echo "===== 关键配置检查 ====="
-          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO|KALLSYMS|KALLSYMS_ALL|KPROBES|FUNCTION_TRACER|DYNAMIC_FTRACE|IKCONFIG)=" out/.config || true
+          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO)=" out/.config || true
 
           echo ""
           echo "===== Container config check ====="
           grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" out/.config || true
 
-      # ============ 10. 应用 Droidspaces 非 GKI 补丁 ============
+      # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
       - name: Apply Droidspaces non-GKI patches
         working-directory: ./kernel
         shell: bash
         run: |
-          echo "===== 下载 Droidspaces 非 GKI 补丁 ====="
-          curl -L -o /tmp/p1.patch \
-            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
-          curl -L -o /tmp/p2.patch \
-            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
+          echo "======================================"
+          echo "===== 应用 Droidspaces non-GKI 补丁 ====="
+          echo "======================================"
 
-          echo "===== 应用补丁（强制模式）====="
-          patch -p1 --forward < /tmp/p1.patch || true
-          patch -p1 --forward < /tmp/p2.patch || true
+          PATCH_DIR="/tmp/droidspaces-patches"
+          mkdir -p "$PATCH_DIR"
 
-      # ============ 11. 禁用 DTBO overlay 编译 ============
+          echo "===== 下载补丁 ====="
+          curl -L --retry 3 --retry-delay 5 -o "$PATCH_DIR/01.fix_xt_qtaguid_panic.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch" || true
+          curl -L --retry 3 --retry-delay 5 -o "$PATCH_DIR/02.fix_cgroup_prefix.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" || true
+
+          echo "===== 下载结果 ====="
+          ls -la "$PATCH_DIR/"
+
+          echo ""
+          echo "===== 逐个应用补丁（dry-run 通过才应用）====="
+          APPLIED=0
+          SKIPPED=0
+
+          for patch_file in "$PATCH_DIR"/*.patch; do
+            [ -f "$patch_file" ] || continue
+
+            PATCH_NAME=$(basename "$patch_file")
+            echo ""
+            echo "----- 检查: $PATCH_NAME -----"
+
+            # 文件有效性检查
+            if [ ! -s "$patch_file" ]; then
+              echo "⚠ 补丁文件为空，跳过"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            # 检查是否是 HTML 错误页（下载失败）
+            if head -c 100 "$patch_file" | grep -qi "<!DOCTYPE\|<html"; then
+              echo "⚠ 补丁下载得到 HTML 页面（URL 失效），跳过"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            # dry-run：只有干净应用才真正应用
+            if patch -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
+              echo "✓ Dry-run 通过，正式应用..."
+              patch -p1 < "$patch_file"
+              APPLIED=$((APPLIED + 1))
+              echo "✓ $PATCH_NAME 应用成功"
+            else
+              echo "⚠ Dry-run 失败（补丁上下文与本内核不匹配），跳过此补丁"
+              echo "   这是正常现象：Droidspaces 官方补丁针对特定内核版本，"
+              echo "   你的内核已被 LG/LineageOS 修改过，上下文可能不一致。"
+              SKIPPED=$((SKIPPED + 1))
+            fi
+          done
+
+          echo ""
+          echo "===== 补丁应用总结 ====="
+          echo "已应用: $APPLIED 个"
+          echo "已跳过: $SKIPPED 个"
+          echo ""
+          echo "===== 补丁步骤完成 ====="
+
+      # ============ 9. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
         working-directory: ./kernel
         run: |
@@ -339,7 +355,7 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 12. 编译内核 ============
+      # ============ 10. 编译内核 ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
@@ -379,34 +395,17 @@ jobs:
           find out -name "*.ko" | head -30 || true
           echo "模块总数: $(find out -name '*.ko' | wc -l)"
 
-      # ============ 13. APatch 修补内核 ============
-      - name: Patch kernel with APatch
-        working-directory: ./kernel
-        shell: bash
+      # ============ 10.5 ccache 统计 ============
+      - name: Show ccache stats after build
+        if: always()
         run: |
-          echo "===== 解压 Image.gz ====="
-          gunzip -c out/arch/arm64/boot/Image.gz > out/arch/arm64/boot/Image
-          ls -lh out/arch/arm64/boot/Image
+          echo "===== 最终 ccache 统计 ====="
+          ccache -s -v
+          echo ""
+          echo "===== 缓存目录大小 ====="
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
 
-          echo "===== 应用 APatch KernelPatch ====="
-          /tmp/kpatch/kptools -p \
-            -i out/arch/arm64/boot/Image \
-            -o out/arch/arm64/boot/Image.apatch \
-            -s "${{ github.event.inputs.apatch_superkey }}"
-
-          if [ ! -f out/arch/arm64/boot/Image.apatch ]; then
-            echo "::error::APatch 修补失败"
-            exit 1
-          fi
-
-          mv out/arch/arm64/boot/Image.apatch out/arch/arm64/boot/Image
-
-          echo "===== 重新压缩 ====="
-          gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
-          file out/arch/arm64/boot/Image.gz
-          ls -lh out/arch/arm64/boot/Image.gz
-
-      # ============ 14. 下载 mkbootimg 工具 ============
+      # ============ 11. 下载 mkbootimg 工具 ============
       - name: Fetch LineageOS mkbootimg tools
         run: |
           git clone --depth=1 -b lineage-22.2 \
@@ -414,13 +413,13 @@ jobs:
             /tmp/lineage-mkbootimg
           ls -la /tmp/lineage-mkbootimg/*.py
 
-      # ============ 15. 重打包 boot.img ============
+      # ============ 12. 重打包 boot.img ============
       - name: Repack boot.img with new kernel
         shell: bash
         run: |
           set -e
           BOOT_SRC="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
-          BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container-apatch.img"
+          BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
           KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
           WORK="/tmp/boot-work"
           TOOLS="/tmp/lineage-mkbootimg"
@@ -489,16 +488,16 @@ jobs:
           echo "===== Final ====="
           ls -lh "$BOOT_OUT"
 
-      # ============ 16. 上传 boot.img ============
+      # ============ 13. 上传 boot.img ============
       - name: Upload new boot.img
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-flashlmdd-apatch-${{ github.run_number }}
-          path: ${{ github.workspace }}/boot-flashlmdd-container-apatch.img
+          name: boot-flashlmdd-container-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-container.img
           retention-days: 7
 
-      # ============ 17. 上传日志 ============
+      # ============ 14. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
