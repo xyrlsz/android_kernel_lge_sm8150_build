@@ -1,4 +1,4 @@
-name: Build Container-Supported Kernel (LG V50) + boot.img Repack
+name: Build Container-Supported Kernel (LG V50) + APatch + boot.img Repack
 
 on:
   workflow_dispatch:
@@ -15,6 +15,10 @@ on:
         description: "Path to prebuilt boot.img in this repo"
         required: true
         default: "prebuilt/boot.img"
+      apatch_superkey:
+        description: "SuperKey for APatch (set a strong password)"
+        required: true
+        default: "Apatch123!"
 
 env:
   KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
@@ -22,6 +26,7 @@ env:
   SUBARCH: arm64
   CCACHE_DIR: /home/runner/.cache/ccache-kernel
   ZYC_CLANG_VERSION: "16.0.6-20260807"
+  APATCH_REPO: "https://github.com/bmax121/KernelPatch"
 
 jobs:
   build:
@@ -78,7 +83,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-nopatch-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-apatch-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
@@ -130,20 +135,23 @@ jobs:
 
           echo "/home/runner/zyc-clang/bin" >> $GITHUB_PATH
 
-      # ============ 6. 下载 GCC 4.9（4.14 内核仍需） ============
+      # ============ 6. 下载 GCC 4.9 工具链 ============
       - name: Clone GCC 4.9 toolchains
         shell: bash
         run: |
+          # 64位 GCC
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
             /tmp/gcc64
           echo "/tmp/gcc64/bin" >> $GITHUB_PATH
 
+          # 32位 GCC
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
             /tmp/gcc32
           echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
+          # 创建符号链接
           cd /tmp/gcc64/bin
           for f in aarch64-linux-android-4.9-*; do
             [ -e "$f" ] || continue
@@ -155,7 +163,27 @@ jobs:
             ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
           done
 
-      # ============ 7. 验证工具链与 ccache ============
+      # ============ 7. 下载 KernelPatch 工具 ============
+      - name: Download KernelPatch tools
+        shell: bash
+        run: |
+          echo "===== 下载 KernelPatch 工具 ====="
+
+          mkdir -p /tmp/kpatch
+          cd /tmp/kpatch
+
+          # 下载预编译的 kptools
+          wget -q \
+            "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-android" \
+            -O kptools
+          chmod +x kptools
+
+          echo "===== kptools 版本 ====="
+          ./kptools -v || true
+
+          ls -la /tmp/kpatch/
+
+      # ============ 8. 验证工具链与 ccache ============
       - name: Verify toolchain and ccache
         shell: bash
         run: |
@@ -167,6 +195,8 @@ jobs:
           clang --version
           echo "===== which aarch64-linux-android-ld ====="
           which aarch64-linux-android-ld
+          echo "===== which arm-linux-androideabi-ld ====="
+          which arm-linux-androideabi-ld
 
           echo ""
           echo "===== 测试 ccache 拦截 clang ====="
@@ -177,10 +207,10 @@ jobs:
           echo "第二次编译（hit）"
 
           echo ""
-          echo "===== ccache 统计（应为 1 hit, 1 miss）====="
+          echo "===== ccache 统计 ====="
           ccache -s
 
-      # ============ 8. 配置内核 + 注入容器支持 ============
+      # ============ 9. 配置内核 + 注入容器支持 + 32位支持 ============
       - name: Configure kernel
         working-directory: ./kernel
         run: |
@@ -195,7 +225,7 @@ jobs:
           clang --version
           ccache -s
 
-          # 生成 defconfig（-gdwarf-4 关键）
+          # 生成 defconfig
           make O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
@@ -207,7 +237,19 @@ jobs:
           # 禁用 DWARF v5
           ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 
-          # ============ 1. Namespaces ============
+          # ============================================
+          # 32位应用支持 (CONFIG_COMPAT)
+          # ============================================
+          echo "===== 启用 32位应用支持 ====="
+          ./scripts/config --file $CFG \
+            -e COMPAT \
+            -e COMPAT_32BIT_TIME \
+            -e KUSER_HELPERS \
+            -e COMPAT_VDSO
+
+          # ============================================
+          # 1. Namespaces
+          # ============================================
           ./scripts/config --file $CFG \
             -e NAMESPACES -e NET_NS -e PID_NS -e UTS_NS -e USER_NS \
             -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS
@@ -294,7 +336,23 @@ jobs:
           ./scripts/config --file $CFG \
             -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
 
-          # 自动处理依赖（-gdwarf-4 关键）
+          # ============ 14. APatch 必需配置 ============
+          echo "===== 启用 APatch 必需配置 ====="
+          ./scripts/config --file $CFG \
+            -e KALLSYMS \
+            -e KALLSYMS_ALL \
+            -e KALLSYMS_EXTRA_PASS \
+            -e MODULES \
+            -e MODULE_UNLOAD \
+            -e MODULE_FORCE_UNLOAD \
+            -e KPROBES \
+            -e HAVE_KPROBES \
+            -e KPROBE_EVENTS \
+            -e FUNCTION_TRACER \
+            -e DYNAMIC_FTRACE \
+            -e FTRACE
+
+          # 自动处理依赖
           make O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
@@ -302,20 +360,16 @@ jobs:
             olddefconfig
 
           echo ""
+          echo "===== 关键配置检查 ====="
+          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO|KALLSYMS|KALLSYMS_ALL|MODULES|KPROBES|FUNCTION_TRACER|DYNAMIC_FTRACE)=" \
+            out/.config || true
+
+          echo ""
           echo "===== Container config check ====="
           grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" \
             out/.config || true
 
-          echo ""
-          echo "===== Netfilter 关键项 ====="
-          grep -E "^CONFIG_(NETFILTER_XT_MATCH_ADDRTYPE|NETFILTER_XT_MATCH_CONNTRACK|NETFILTER_XT_MATCH_IPVS|NETFILTER_XT_TARGET_MASQUERADE|NETFILTER_XT_TARGET_REDIRECT|NETFILTER_XT_TARGET_MARK|NETFILTER_XT_MATCH_COMMENT|IP_NF_IPTABLES|IP_NF_NAT|IP_NF_FILTER|IP_NF_MANGLE|IP_NF_RAW|NF_NAT|NF_CONNTRACK|NETFILTER_ADVANCED|NETFILTER_XTABLES)" \
-            out/.config || true
-
-          echo ""
-          echo "===== IPVS 协议 ====="
-          grep -E "^CONFIG_IP_VS" out/.config || true
-
-      # ============ 9. 禁用 DTBO overlay 编译 ============
+      # ============ 10. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
         working-directory: ./kernel
         run: |
@@ -323,7 +377,7 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 10. 编译内核（ccache + zyc-clang + DWARF v4） ============
+      # ============ 11. 编译内核 ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
@@ -338,7 +392,7 @@ jobs:
 
           START_TIME=$(date +%s)
 
-          # KCFLAGS=-gdwarf-4 强制 clang 输出 DWARF v4
+          # 编译，启用32位支持
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
@@ -370,7 +424,47 @@ jobs:
           find out -name "*.ko" | head -30 || true
           echo "模块总数: $(find out -name '*.ko' | wc -l)"
 
-      # ============ 10.5 ccache 统计 ============
+      # ============ 11.5 使用 APatch 修补内核 ============
+      - name: Patch kernel with APatch
+        working-directory: ./kernel
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "===== 使用 APatch 修补内核 ====="
+          echo "======================================"
+
+          # 解压 Image.gz 得到原始 Image
+          echo "===== 解压 Image.gz ====="
+          gunzip -c out/arch/arm64/boot/Image.gz > out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+
+          # 使用 kptools 修补内核
+          echo "===== 应用 APatch KernelPatch ====="
+          /tmp/kpatch/kptools patch \
+            -i out/arch/arm64/boot/Image \
+            -o out/arch/arm64/boot/Image.apatch \
+            -s "${{ github.event.inputs.apatch_superkey }}" \
+            -k
+
+          if [ ! -f out/arch/arm64/boot/Image.apatch ]; then
+            echo "::error::APatch 修补失败，未生成 Image.apatch"
+            exit 1
+          fi
+
+          echo "===== APatch 修补成功 ====="
+          ls -lh out/arch/arm64/boot/Image.apatch
+
+          # 替换原始 Image
+          mv out/arch/arm64/boot/Image.apatch out/arch/arm64/boot/Image
+
+          # 重新压缩为 Image.gz
+          echo "===== 重新压缩 Image.gz ====="
+          gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo "===== APatch 内核修补完成 ====="
+
+      # ============ 11.6 ccache 统计 ============
       - name: Show ccache stats after build
         if: always()
         run: |
@@ -380,7 +474,7 @@ jobs:
           echo "===== 缓存目录大小 ====="
           du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
 
-      # ============ 11. 下载 mkbootimg 工具 ============
+      # ============ 12. 下载 mkbootimg 工具 ============
       - name: Fetch LineageOS mkbootimg tools
         run: |
           git clone --depth=1 -b lineage-22.2 \
@@ -388,13 +482,13 @@ jobs:
             /tmp/lineage-mkbootimg
           ls -la /tmp/lineage-mkbootimg/*.py
 
-      # ============ 12. 重打包 boot.img ============
+      # ============ 13. 重打包 boot.img ============
       - name: Repack boot.img with new kernel
         shell: bash
         run: |
           set -e
           BOOT_SRC="${{ github.workspace }}/builder/${{ github.event.inputs.boot_img_path }}"
-          BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container.img"
+          BOOT_OUT="${{ github.workspace }}/boot-flashlmdd-container-apatch.img"
           KERNEL_NEW="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
           WORK="/tmp/boot-work"
           TOOLS="/tmp/lineage-mkbootimg"
@@ -465,16 +559,16 @@ jobs:
           echo "===== Final ====="
           ls -lh "$BOOT_OUT"
 
-      # ============ 13. 上传 boot.img ============
+      # ============ 14. 上传 boot.img ============
       - name: Upload new boot.img
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-flashlmdd-container-${{ github.run_number }}
-          path: ${{ github.workspace }}/boot-flashlmdd-container.img
+          name: boot-flashlmdd-apatch-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-container-apatch.img
           retention-days: 7
 
-      # ============ 14. 上传日志 ============
+      # ============ 15. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
