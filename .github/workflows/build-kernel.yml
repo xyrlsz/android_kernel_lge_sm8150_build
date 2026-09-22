@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-nopatch-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
@@ -315,70 +315,6 @@ jobs:
           echo "===== IPVS 协议 ====="
           grep -E "^CONFIG_IP_VS" out/.config || true
 
-      # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
-      - name: Apply Droidspaces non-GKI patches
-        working-directory: ./kernel
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "===== 应用 Droidspaces non-GKI 补丁 ====="
-          echo "======================================"
-
-          PATCH_DIR="/tmp/droidspaces-patches"
-          mkdir -p "$PATCH_DIR"
-
-          cat > "$PATCH_DIR/01.fix_xt_qtaguid_panic.patch" << 'PATCH_EOF'
-          --- a/net/netfilter/xt_qtaguid.c
-          +++ b/net/netfilter/xt_qtaguid.c
-          @@ -1,3 +1,7 @@
-          +/*
-          + * Fix for Droidspaces/LXC: prevent kernel panic in xt_qtaguid
-          + */
-           #include <linux/module.h>
-           #include <linux/netfilter/x_tables.h>
-           #include <linux/netfilter/xt_qtaguid.h>
-          PATCH_EOF
-
-          cat > "$PATCH_DIR/02.fix_cgroup_prefix.patch" << 'PATCH_EOF'
-          --- a/kernel/cgroup/cgroup.c
-          +++ b/kernel/cgroup/cgroup.c
-          @@ -3496,6 +3496,11 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
-           	spin_unlock_irq(&cgroup_file_kn_lock);
-           }
-           
-          +	if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {
-          +		snprintf(name, CGROUP_FILE_NAME_MAX, "%s.%s", cft->ss->name, cft->name);
-          +		kernfs_create_link(cgrp->kn, name, kn);
-          +	}
-          +
-           	return 0;
-           }
-          PATCH_EOF
-
-          echo "===== 补丁文件已创建 ====="
-          ls -la "$PATCH_DIR/"
-
-          for patch_file in "$PATCH_DIR"/*.patch; do
-            echo ""
-            echo "----- 应用: $(basename "$patch_file") -----"
-
-            if patch -p1 --dry-run < "$patch_file" 2>&1; then
-              echo "Dry-run 通过，正式应用..."
-              patch -p1 < "$patch_file"
-              echo "✓ 补丁应用成功"
-            else
-              echo "⚠ Dry-run 失败，尝试强制应用..."
-              if patch -p1 --forward < "$patch_file"; then
-                echo "✓ 补丁应用成功（强制模式）"
-              else
-                echo "⚠ 补丁应用失败，继续（可能内核版本无需该补丁）"
-              fi
-            fi
-          done
-
-          echo ""
-          echo "===== 补丁应用完成 ====="
-
       # ============ 9. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
         working-directory: ./kernel
@@ -402,8 +338,7 @@ jobs:
 
           START_TIME=$(date +%s)
 
-          # 关键：KCFLAGS=-gdwarf-4 强制 clang 输出 DWARF v4
-          # 避免 GCC 4.9 的 as 无法解析 DWARF v5 的 .file/.loc 指令
+          # KCFLAGS=-gdwarf-4 强制 clang 输出 DWARF v4
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
