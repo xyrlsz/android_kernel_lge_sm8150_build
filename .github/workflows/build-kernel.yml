@@ -78,8 +78,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-
             ${{ runner.os }}-kernel-ccache-
@@ -127,7 +128,6 @@ jobs:
           echo "===== zyc-clang 版本 ====="
           /home/runner/zyc-clang/bin/clang --version
 
-          # 加入 PATH（下一步生效）
           echo "/home/runner/zyc-clang/bin" >> $GITHUB_PATH
 
       # ============ 6. 下载 GCC 4.9（4.14 内核仍需） ============
@@ -195,8 +195,11 @@ jobs:
           clang --version
           ccache -s
 
+          # 生成 defconfig（-gdwarf-4 关键）
           make O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            KCFLAGS="-gdwarf-4" \
             ${{ github.event.inputs.defconfig_path }}
 
           CFG="out/.config"
@@ -291,7 +294,12 @@ jobs:
           ./scripts/config --file $CFG \
             -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
 
-          make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
+          # 自动处理依赖（-gdwarf-4 关键）
+          make O=out ARCH=arm64 SUBARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            KCFLAGS="-gdwarf-4" \
+            olddefconfig
 
           echo ""
           echo "===== Container config check ====="
@@ -379,7 +387,7 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 10. 编译内核（ccache + zyc-clang） ============
+      # ============ 10. 编译内核（ccache + zyc-clang + DWARF v4） ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
@@ -394,13 +402,15 @@ jobs:
 
           START_TIME=$(date +%s)
 
-          # 关键：CC 和 HOSTCC 用 "ccache clang"，直接让 zyc-clang 走 ccache
+          # 关键：KCFLAGS=-gdwarf-4 强制 clang 输出 DWARF v4
+          # 避免 GCC 4.9 的 as 无法解析 DWARF v5 的 .file/.loc 指令
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            KCFLAGS="-gdwarf-4" \
             2>&1 | tee build.log
 
           BUILD_STATUS=${PIPESTATUS[0]}
