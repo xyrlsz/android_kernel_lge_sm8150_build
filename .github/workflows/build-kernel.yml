@@ -16,9 +16,9 @@ on:
         required: true
         default: "prebuilt/boot.img"
       apatch_superkey:
-        description: "SuperKey for APatch (set a strong password)"
+        description: "SuperKey for APatch (letters and numbers only, min 8 chars)"
         required: true
-        default: "Apatch123!"
+        default: "Apatch12345678"
 
 env:
   KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
@@ -26,7 +26,6 @@ env:
   SUBARCH: arm64
   CCACHE_DIR: /home/runner/.cache/ccache-kernel
   ZYC_CLANG_VERSION: "16.0.6-20260807"
-  APATCH_REPO: "https://github.com/bmax121/KernelPatch"
 
 jobs:
   build:
@@ -83,18 +82,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-apatch-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-apatch-v2-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-
-            ${{ runner.os }}-kernel-ccache-
 
       - name: Setup ccache environment
         shell: bash
         run: |
           mkdir -p "$CCACHE_DIR"
-
           {
             echo "CCACHE_DIR=$CCACHE_DIR"
             echo "CCACHE_MAXSIZE=5G"
@@ -107,51 +104,33 @@ jobs:
             echo "CCACHE_DEPEND=true"
           } >> $GITHUB_ENV
 
-          echo "===== ccache 初始状态 ====="
-          ccache -s
-          ccache -p | grep -E "cache_dir|max_size|compression" || true
-
       # ============ 5. 下载 zyc-clang 工具链 ============
       - name: Setup zyc-clang toolchain
         shell: bash
         run: |
-          echo "===== 下载 zyc-clang ${{ env.ZYC_CLANG_VERSION }} ====="
-
           mkdir -p /home/runner/zyc-clang
           cd /home/runner/zyc-clang
-
           wget -q \
             "https://github.com/ZyCromerZ/Clang/releases/download/${ZYC_CLANG_VERSION}-release/Clang-${ZYC_CLANG_VERSION}.tar.gz" \
             -O zyc-clang.tar.gz
-
           tar -zxf zyc-clang.tar.gz
           rm zyc-clang.tar.gz
-
-          echo "===== zyc-clang 目录结构 ====="
-          ls -la /home/runner/zyc-clang/
-
-          echo "===== zyc-clang 版本 ====="
           /home/runner/zyc-clang/bin/clang --version
-
           echo "/home/runner/zyc-clang/bin" >> $GITHUB_PATH
 
       # ============ 6. 下载 GCC 4.9 工具链 ============
       - name: Clone GCC 4.9 toolchains
         shell: bash
         run: |
-          # 64位 GCC
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
             /tmp/gcc64
           echo "/tmp/gcc64/bin" >> $GITHUB_PATH
-
-          # 32位 GCC
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
             /tmp/gcc32
           echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-          # 创建符号链接
           cd /tmp/gcc64/bin
           for f in aarch64-linux-android-4.9-*; do
             [ -e "$f" ] || continue
@@ -163,54 +142,40 @@ jobs:
             ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
           done
 
-      # ============ 7. 下载 KernelPatch 工具 ============
-      - name: Download KernelPatch tools
+      # ============ 7. 下载并构建 KernelPatch 工具 ============
+      - name: Download and build KernelPatch tools
         shell: bash
         run: |
-          echo "===== 下载 KernelPatch 工具 ====="
-
           mkdir -p /tmp/kpatch
           cd /tmp/kpatch
 
-          # 下载预编译的 kptools
-          wget -q \
-            "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-android" \
-            -O kptools
-          chmod +x kptools
+          # 优先下载 Linux x86_64 预编译版
+          if wget -q --spider "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-linux" 2>/dev/null; then
+            wget -q "https://github.com/bmax121/KernelPatch/releases/latest/download/kptools-linux" -O kptools
+            echo "下载 kptools-linux 预编译版成功"
+          else
+            echo "kptools-linux 不存在，从源码编译"
+            git clone --depth=1 https://github.com/bmax121/KernelPatch /tmp/KernelPatch
+            cd /tmp/KernelPatch
+            make -C tools
+            cp tools/kptools /tmp/kpatch/
+          fi
 
-          echo "===== kptools 版本 ====="
-          ./kptools -v || true
+          chmod +x /tmp/kpatch/kptools
+          file /tmp/kpatch/kptools
+          /tmp/kpatch/kptools -h || true
 
-          ls -la /tmp/kpatch/
-
-      # ============ 8. 验证工具链与 ccache ============
-      - name: Verify toolchain and ccache
+      # ============ 8. 验证工具链 ============
+      - name: Verify toolchain
         shell: bash
         run: |
           export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-
-          echo "===== which clang ====="
           which clang
-          echo "===== clang version ====="
           clang --version
-          echo "===== which aarch64-linux-android-ld ====="
           which aarch64-linux-android-ld
-          echo "===== which arm-linux-androideabi-ld ====="
           which arm-linux-androideabi-ld
 
-          echo ""
-          echo "===== 测试 ccache 拦截 clang ====="
-          echo 'int main(){return 0;}' > /tmp/test.c
-          ccache clang -c /tmp/test.c -o /tmp/test.o
-          echo "第一次编译（miss）"
-          ccache clang -c /tmp/test.c -o /tmp/test.o
-          echo "第二次编译（hit）"
-
-          echo ""
-          echo "===== ccache 统计 ====="
-          ccache -s
-
-      # ============ 9. 配置内核 + 注入容器支持 + 32位支持 ============
+      # ============ 9. 配置内核 ============
       - name: Configure kernel
         working-directory: ./kernel
         run: |
@@ -219,13 +184,6 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-          echo "===== 环境检查 ====="
-          echo "CCACHE_DIR=$CCACHE_DIR"
-          which clang
-          clang --version
-          ccache -s
-
-          # 生成 defconfig
           make O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
@@ -234,123 +192,114 @@ jobs:
 
           CFG="out/.config"
 
-          # 禁用 DWARF v5
-          ./scripts/config --file $CFG -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
-
           # ============================================
-          # 32位应用支持 (CONFIG_COMPAT)
+          # 1. 32位应用支持
           # ============================================
-          echo "===== 启用 32位应用支持 ====="
           ./scripts/config --file $CFG \
-            -e COMPAT \
-            -e COMPAT_32BIT_TIME \
-            -e KUSER_HELPERS \
-            -e COMPAT_VDSO
+            -e COMPAT -e COMPAT_32BIT_TIME \
+            -e KUSER_HELPERS -e COMPAT_VDSO
 
           # ============================================
-          # 1. Namespaces
+          # 2. Namespaces
           # ============================================
           ./scripts/config --file $CFG \
             -e NAMESPACES -e NET_NS -e PID_NS -e UTS_NS -e USER_NS \
-            -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS
+            -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS -e SYSCTL
 
-          # ============ 2. devtmpfs ============
+          # ============================================
+          # 3. Cgroups
+          # ============================================
           ./scripts/config --file $CFG \
-            -e DEVTMPFS -e DEVTMPFS_MOUNT
+            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_PIDS -e MEMCG \
+            -e CGROUP_SCHED -e FAIR_GROUP_SCHED -e CGROUP_FREEZER \
+            -e CGROUP_NET_PRIO -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
+            -e CGROUP_BPF -e CPUSETS
 
-          # ============ 3. Cgroups ============
+          # ============================================
+          # 4. 网络基础 + Droidspaces 网络隔离
+          # ============================================
           ./scripts/config --file $CFG \
-            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
-            -e CGROUP_FREEZER -e CGROUP_SCHED -e CPUSETS -e MEMCG \
-            -e CGROUP_BPF -e CGROUP_PIDS -e CGROUP_NET_PRIO
-
-          # ============ 4. 网络基础 ============
-          ./scripts/config --file $CFG \
-            -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e NETFILTER_ADVANCED \
-            -e NF_CONNTRACK -e NF_NAT -e NF_NAT_IPV4 -e NF_NAT_IPV6 \
-            -e NETFILTER_XTABLES
-
-          # ============ 5. iptables ============
-          ./scripts/config --file $CFG \
+            -e NETFILTER -e VETH -e BRIDGE -e BRIDGE_NETFILTER \
+            -e NETFILTER_ADVANCED -e NF_CONNTRACK -e NF_NAT -e NF_TABLES \
             -e IP_NF_IPTABLES -e IP_NF_FILTER -e IP_NF_NAT -e IP_NF_MANGLE \
             -e IP_NF_RAW -e IP_NF_ARPTABLES -e IP_NF_TARGET_MASQUERADE \
-            -e IP_NF_TARGET_REDIRECT \
-            -e IP6_NF_IPTABLES -e IP6_NF_FILTER -e IP6_NF_NAT -e IP6_NF_MANGLE \
-            -e IP6_NF_RAW -e IP6_NF_TARGET_MASQUERADE
+            -e IP_NF_TARGET_REDIRECT -e IP6_NF_IPTABLES -e IP6_NF_FILTER \
+            -e IP6_NF_NAT -e IP6_NF_MANGLE -e IP6_NF_RAW \
+            -e IP6_NF_TARGET_MASQUERADE \
+            -e NETFILTER_XT_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_TCPMSS \
+            -e NETFILTER_XT_MATCH_ADDRTYPE -e NF_CONNTRACK_NETLINK \
+            -e NF_NAT_REDIRECT -e IP_ADVANCED_ROUTER -e IP_MULTIPLE_TABLES \
+            -e NF_CONNTRACK_IPV4 -e NF_NAT_IPV4 -e NETFILTER_XTABLES
 
-          # ============ 6. Netfilter 扩展 ============
-          ./scripts/config --file $CFG \
-            -e NETFILTER_XT_MATCH_ADDRTYPE -e NETFILTER_XT_MATCH_CONNTRACK \
-            -e NETFILTER_XT_MATCH_CONNMARK -e NETFILTER_XT_MATCH_MARK \
-            -e NETFILTER_XT_MATCH_COMMENT -e NETFILTER_XT_MATCH_STATE \
-            -e NETFILTER_XT_MATCH_MULTIPORT -e NETFILTER_XT_MATCH_IPRANGE \
-            -e NETFILTER_XT_MATCH_LIMIT -e NETFILTER_XT_MATCH_MAC \
-            -e NETFILTER_XT_MATCH_OWNER -e NETFILTER_XT_MATCH_PKTTYPE \
-            -e NETFILTER_XT_MATCH_QUOTA -e NETFILTER_XT_MATCH_SOCKET \
-            -e NETFILTER_XT_MATCH_TCPMSS -e NETFILTER_XT_MATCH_HL \
-            -e NETFILTER_XT_MATCH_ESP -e NETFILTER_XT_MATCH_HELPER \
-            -e NETFILTER_XT_MATCH_POLICY -e NETFILTER_XT_MATCH_STATISTIC \
-            -e NETFILTER_XT_MATCH_STRING -e NETFILTER_XT_MATCH_TIME \
-            -e NETFILTER_XT_MATCH_U32 -e NETFILTER_XT_MATCH_DSCP \
-            -e NETFILTER_XT_MATCH_ECN -e NETFILTER_XT_MATCH_HASHLIMIT
+          # 关键：禁用 ANDROID_PARANOID_NETWORK，否则容器内无法联网
+          ./scripts/config --file $CFG -d ANDROID_PARANOID_NETWORK
 
+          # ============================================
+          # 5. Netfilter 扩展
+          # ============================================
           ./scripts/config --file $CFG \
-            -e NETFILTER_XT_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_REDIRECT \
+            -e NETFILTER_XT_MATCH_CONNTRACK -e NETFILTER_XT_MATCH_CONNMARK \
+            -e NETFILTER_XT_MATCH_MARK -e NETFILTER_XT_MATCH_COMMENT \
+            -e NETFILTER_XT_MATCH_STATE -e NETFILTER_XT_MATCH_MULTIPORT \
+            -e NETFILTER_XT_MATCH_IPRANGE -e NETFILTER_XT_MATCH_LIMIT \
+            -e NETFILTER_XT_MATCH_MAC -e NETFILTER_XT_MATCH_OWNER \
+            -e NETFILTER_XT_MATCH_PKTTYPE -e NETFILTER_XT_MATCH_QUOTA \
+            -e NETFILTER_XT_MATCH_SOCKET -e NETFILTER_XT_MATCH_TCPMSS \
+            -e NETFILTER_XT_MATCH_HL -e NETFILTER_XT_MATCH_ESP \
+            -e NETFILTER_XT_MATCH_HELPER -e NETFILTER_XT_MATCH_POLICY \
+            -e NETFILTER_XT_MATCH_STATISTIC -e NETFILTER_XT_MATCH_STRING \
+            -e NETFILTER_XT_MATCH_TIME -e NETFILTER_XT_MATCH_U32 \
+            -e NETFILTER_XT_MATCH_DSCP -e NETFILTER_XT_MATCH_ECN \
+            -e NETFILTER_XT_MATCH_HASHLIMIT \
             -e NETFILTER_XT_TARGET_MARK -e NETFILTER_XT_TARGET_NETMAP \
             -e NETFILTER_XT_TARGET_CONNMARK -e NETFILTER_XT_TARGET_CT \
             -e NETFILTER_XT_TARGET_HL -e NETFILTER_XT_TARGET_DSCP \
-            -e NETFILTER_XT_TARGET_TCPMSS -e NETFILTER_XT_TARGET_CLASSIFY \
-            -e NETFILTER_XT_TARGET_IDLETIMER -e NETFILTER_XT_TARGET_TRACE
+            -e NETFILTER_XT_TARGET_CLASSIFY -e NETFILTER_XT_TARGET_IDLETIMER \
+            -e NETFILTER_XT_TARGET_TRACE
 
-          # ============ 7. IPVS ============
+          # ============================================
+          # 6. IPVS
+          # ============================================
           ./scripts/config --file $CFG \
             -e IP_VS -e IP_VS_PROTO_TCP -e IP_VS_PROTO_UDP -e IP_VS_PROTO_SCTP \
-            -e IP_VS_PROTO_AH -e IP_VS_PROTO_ESP \
-            -e IP_VS_RR -e IP_VS_WRR -e IP_VS_LC -e IP_VS_WLC \
-            -e IP_VS_FO -e IP_VS_OVF -e IP_VS_LBLC -e IP_VS_LBLCR \
-            -e IP_VS_DH -e IP_VS_SH -e IP_VS_SED -e IP_VS_NQ -e IP_VS_NFCT
+            -e IP_VS_PROTO_AH -e IP_VS_PROTO_ESP -e IP_VS_RR -e IP_VS_WRR \
+            -e IP_VS_LC -e IP_VS_WLC -e IP_VS_FO -e IP_VS_OVF \
+            -e IP_VS_LBLC -e IP_VS_LBLCR -e IP_VS_DH -e IP_VS_SH \
+            -e IP_VS_SED -e IP_VS_NQ -e IP_VS_NFCT
 
-          # ============ 8. OverlayFS ============
+          # ============================================
+          # 7. OverlayFS + 文件系统
+          # ============================================
           ./scripts/config --file $CFG \
-            -e OVERLAY_FS -e OVERLAY_FS_REDIRECT_DIR -e OVERLAY_FS_INDEX
-
-          # ============ 9. 文件系统 ============
-          ./scripts/config --file $CFG \
+            -e OVERLAY_FS -e OVERLAY_FS_REDIRECT_DIR -e OVERLAY_FS_INDEX \
             -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_LZ4 -e SQUASHFS_ZSTD \
-            -e EXT4_FS -e FUSE_FS -e TMPFS \
-            -e BLK_DEV_LOOP -e BLK_DEV_NBD
+            -e EXT4_FS -e FUSE_FS -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
+            -e BLK_DEV_LOOP -e BLK_DEV_NBD -e DEVTMPFS -e DEVTMPFS_MOUNT
 
-          # ============ 10. Netlink ============
+          # ============================================
+          # 8. Netlink + Seccomp + BPF + TUN/TAP
+          # ============================================
           ./scripts/config --file $CFG \
-            -e NETLINK_DIAG -e INET_DIAG -e PACKET_DIAG -e UNIX_DIAG
-
-          # ============ 11. Seccomp / BPF ============
-          ./scripts/config --file $CFG \
+            -e NETLINK_DIAG -e INET_DIAG -e PACKET_DIAG -e UNIX_DIAG \
             -e SECCOMP -e SECCOMP_FILTER -e BPF_SYSCALL \
-            -e NET_SCHED -e NET_CLS_ACT -e NET_CLS_BPF -e NET_ACT_BPF
+            -e NET_SCHED -e NET_CLS_ACT -e NET_CLS_BPF -e NET_ACT_BPF \
+            -e TUN -e TAP -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
 
-          # ============ 12. TUN/TAP ============
-          ./scripts/config --file $CFG -e TUN -e TAP
-
-          # ============ 13. veth 相关 ============
+          # ============================================
+          # 9. 固件加载
+          # ============================================
           ./scripts/config --file $CFG \
-            -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
+            -e FW_LOADER -e FW_LOADER_USER_HELPER -e FW_LOADER_COMPRESS
 
-          # ============ 14. APatch 必需配置 ============
-          echo "===== 启用 APatch 必需配置 ====="
+          # ============================================
+          # 10. APatch 必需配置
+          # ============================================
           ./scripts/config --file $CFG \
-            -e KALLSYMS \
-            -e KALLSYMS_ALL \
-            -e KALLSYMS_EXTRA_PASS \
-            -e MODULES \
-            -e MODULE_UNLOAD \
-            -e MODULE_FORCE_UNLOAD \
-            -e KPROBES \
-            -e HAVE_KPROBES \
-            -e KPROBE_EVENTS \
-            -e FUNCTION_TRACER \
-            -e DYNAMIC_FTRACE \
-            -e FTRACE
+            -e IKCONFIG -e IKCONFIG_PROC \
+            -e KALLSYMS -e KALLSYMS_ALL -e KALLSYMS_EXTRA_PASS \
+            -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_UNLOAD \
+            -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS \
+            -e FUNCTION_TRACER -e DYNAMIC_FTRACE -e FTRACE
 
           # 自动处理依赖
           make O=out ARCH=arm64 SUBARCH=arm64 \
@@ -361,15 +310,28 @@ jobs:
 
           echo ""
           echo "===== 关键配置检查 ====="
-          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO|KALLSYMS|KALLSYMS_ALL|MODULES|KPROBES|FUNCTION_TRACER|DYNAMIC_FTRACE)=" \
-            out/.config || true
+          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO|KALLSYMS|KALLSYMS_ALL|KPROBES|FUNCTION_TRACER|DYNAMIC_FTRACE|IKCONFIG)=" out/.config || true
 
           echo ""
           echo "===== Container config check ====="
-          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" \
-            out/.config || true
+          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" out/.config || true
 
-      # ============ 10. 禁用 DTBO overlay 编译 ============
+      # ============ 10. 应用 Droidspaces 非 GKI 补丁 ============
+      - name: Apply Droidspaces non-GKI patches
+        working-directory: ./kernel
+        shell: bash
+        run: |
+          echo "===== 下载 Droidspaces 非 GKI 补丁 ====="
+          curl -L -o /tmp/p1.patch \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
+          curl -L -o /tmp/p2.patch \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
+
+          echo "===== 应用补丁（强制模式）====="
+          patch -p1 --forward < /tmp/p1.patch || true
+          patch -p1 --forward < /tmp/p2.patch || true
+
+      # ============ 11. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
         working-directory: ./kernel
         run: |
@@ -377,7 +339,7 @@ jobs:
             xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {}
           grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
 
-      # ============ 11. 编译内核 ============
+      # ============ 12. 编译内核 ============
       - name: Build kernel
         working-directory: ./kernel
         run: |
@@ -385,14 +347,10 @@ jobs:
 
           echo "===== Build 开始 ====="
           echo "时间: $(date)"
-          echo "CCACHE_DIR=$CCACHE_DIR"
-          which clang
-          clang --version
           ccache -s
 
           START_TIME=$(date +%s)
 
-          # 编译，启用32位支持
           make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
@@ -417,64 +375,38 @@ jobs:
             exit 1
           fi
 
-          echo "===== New kernel image ====="
           ls -lh out/arch/arm64/boot/Image.gz
-
-          echo "===== 生成的模块列表 ====="
           find out -name "*.ko" | head -30 || true
           echo "模块总数: $(find out -name '*.ko' | wc -l)"
 
-      # ============ 11.5 使用 APatch 修补内核 ============
+      # ============ 13. APatch 修补内核 ============
       - name: Patch kernel with APatch
         working-directory: ./kernel
         shell: bash
         run: |
-          echo "======================================"
-          echo "===== 使用 APatch 修补内核 ====="
-          echo "======================================"
-
-          # 解压 Image.gz 得到原始 Image
           echo "===== 解压 Image.gz ====="
           gunzip -c out/arch/arm64/boot/Image.gz > out/arch/arm64/boot/Image
           ls -lh out/arch/arm64/boot/Image
 
-          # 使用 kptools 修补内核
           echo "===== 应用 APatch KernelPatch ====="
-          /tmp/kpatch/kptools patch \
+          /tmp/kpatch/kptools -p \
             -i out/arch/arm64/boot/Image \
             -o out/arch/arm64/boot/Image.apatch \
-            -s "${{ github.event.inputs.apatch_superkey }}" \
-            -k
+            -s "${{ github.event.inputs.apatch_superkey }}"
 
           if [ ! -f out/arch/arm64/boot/Image.apatch ]; then
-            echo "::error::APatch 修补失败，未生成 Image.apatch"
+            echo "::error::APatch 修补失败"
             exit 1
           fi
 
-          echo "===== APatch 修补成功 ====="
-          ls -lh out/arch/arm64/boot/Image.apatch
-
-          # 替换原始 Image
           mv out/arch/arm64/boot/Image.apatch out/arch/arm64/boot/Image
 
-          # 重新压缩为 Image.gz
-          echo "===== 重新压缩 Image.gz ====="
+          echo "===== 重新压缩 ====="
           gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
+          file out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
 
-          echo "===== APatch 内核修补完成 ====="
-
-      # ============ 11.6 ccache 统计 ============
-      - name: Show ccache stats after build
-        if: always()
-        run: |
-          echo "===== 最终 ccache 统计 ====="
-          ccache -s -v
-          echo ""
-          echo "===== 缓存目录大小 ====="
-          du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
-
-      # ============ 12. 下载 mkbootimg 工具 ============
+      # ============ 14. 下载 mkbootimg 工具 ============
       - name: Fetch LineageOS mkbootimg tools
         run: |
           git clone --depth=1 -b lineage-22.2 \
@@ -482,7 +414,7 @@ jobs:
             /tmp/lineage-mkbootimg
           ls -la /tmp/lineage-mkbootimg/*.py
 
-      # ============ 13. 重打包 boot.img ============
+      # ============ 15. 重打包 boot.img ============
       - name: Repack boot.img with new kernel
         shell: bash
         run: |
@@ -499,8 +431,6 @@ jobs:
           UNPACK_OUT=$(python3 "$TOOLS/unpack_bootimg.py" \
             --boot_img "$BOOT_SRC" \
             --out "$WORK" 2>&1 | tee /dev/stderr)
-
-          ls -la "$WORK/"
 
           HEADER_VERSION=$(echo "$UNPACK_OUT" | grep -i "boot image header version" | awk -F: '{print $2}' | tr -d ' ')
           KERNEL_OFFSET=$(echo "$UNPACK_OUT"  | grep -i "kernel load address"        | awk -F: '{print $2}' | tr -d ' ')
@@ -559,7 +489,7 @@ jobs:
           echo "===== Final ====="
           ls -lh "$BOOT_OUT"
 
-      # ============ 14. 上传 boot.img ============
+      # ============ 16. 上传 boot.img ============
       - name: Upload new boot.img
         if: success()
         uses: actions/upload-artifact@v4
@@ -568,7 +498,7 @@ jobs:
           path: ${{ github.workspace }}/boot-flashlmdd-container-apatch.img
           retention-days: 7
 
-      # ============ 15. 上传日志 ============
+      # ============ 17. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
