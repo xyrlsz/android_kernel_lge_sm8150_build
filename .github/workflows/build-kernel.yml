@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/ccache-kernel
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-patch-v4-${{ hashFiles('kernel/Makefile') }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-minimal-${{ hashFiles('kernel/Makefile') }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
             ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
@@ -166,103 +166,84 @@ jobs:
           CFG="out/.config"
 
           # ============================================
-          # 1. 32位应用支持
+          # 32 位应用支持
           # ============================================
           ./scripts/config --file $CFG \
             -e COMPAT -e COMPAT_32BIT_TIME \
             -e KUSER_HELPERS -e COMPAT_VDSO
 
           # ============================================
-          # 2. Namespaces
+          # IPC 机制
           # ============================================
           ./scripts/config --file $CFG \
-            -e NAMESPACES -e NET_NS -e PID_NS -e UTS_NS -e USER_NS \
-            -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS -e SYSCTL
+            -e SYSCTL -e SYSVIPC -e POSIX_MQUEUE
 
           # ============================================
-          # 3. Cgroups
+          # 核心命名空间
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NAMESPACES -e PID_NS -e UTS_NS -e IPC_NS \
+            -e NET_NS -e USER_NS
+
+          # ============================================
+          # Seccomp
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e SECCOMP -e SECCOMP_FILTER
+
+          # ============================================
+          # 控制组
           # ============================================
           ./scripts/config --file $CFG \
             -e CGROUPS -e CGROUP_DEVICE -e CGROUP_PIDS -e MEMCG \
             -e CGROUP_SCHED -e FAIR_GROUP_SCHED -e CGROUP_FREEZER \
-            -e CGROUP_NET_PRIO -e CGROUP_HUGETLB -e NET_CLS_CGROUP \
-            -e CGROUP_BPF -e CPUSETS
+            -e CGROUP_NET_PRIO
 
           # ============================================
-          # 4. 网络基础 + Droidspaces 网络隔离
+          # 设备文件系统
           # ============================================
           ./scripts/config --file $CFG \
-            -e NETFILTER -e VETH -e BRIDGE -e BRIDGE_NETFILTER \
-            -e NETFILTER_ADVANCED -e NF_CONNTRACK -e NF_NAT -e NF_TABLES \
-            -e IP_NF_IPTABLES -e IP_NF_FILTER -e IP_NF_NAT -e IP_NF_MANGLE \
-            -e IP_NF_RAW -e IP_NF_ARPTABLES -e IP_NF_TARGET_MASQUERADE \
-            -e IP_NF_TARGET_REDIRECT -e IP6_NF_IPTABLES -e IP6_NF_FILTER \
-            -e IP6_NF_NAT -e IP6_NF_MANGLE -e IP6_NF_RAW \
-            -e IP6_NF_TARGET_MASQUERADE \
-            -e NETFILTER_XT_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_TCPMSS \
-            -e NETFILTER_XT_MATCH_ADDRTYPE -e NF_CONNTRACK_NETLINK \
-            -e NF_NAT_REDIRECT -e IP_ADVANCED_ROUTER -e IP_MULTIPLE_TABLES \
-            -e NF_CONNTRACK_IPV4 -e NF_NAT_IPV4 -e NETFILTER_XTABLES
-
-          # 关键：禁用 ANDROID_PARANOID_NETWORK，否则容器内无法联网
-          ./scripts/config --file $CFG -d ANDROID_PARANOID_NETWORK
+            -e DEVTMPFS
 
           # ============================================
-          # 5. Netfilter 扩展
+          # Overlay 文件系统
+          # ============================================
+          ./scripts/config --file $CFG -e OVERLAY_FS
+
+          # ============================================
+          # tmpfs xattr / posix acl
           # ============================================
           ./scripts/config --file $CFG \
-            -e NETFILTER_XT_MATCH_CONNTRACK -e NETFILTER_XT_MATCH_CONNMARK \
-            -e NETFILTER_XT_MATCH_MARK -e NETFILTER_XT_MATCH_COMMENT \
-            -e NETFILTER_XT_MATCH_STATE -e NETFILTER_XT_MATCH_MULTIPORT \
-            -e NETFILTER_XT_MATCH_IPRANGE -e NETFILTER_XT_MATCH_LIMIT \
-            -e NETFILTER_XT_MATCH_MAC -e NETFILTER_XT_MATCH_OWNER \
-            -e NETFILTER_XT_MATCH_PKTTYPE -e NETFILTER_XT_MATCH_QUOTA \
-            -e NETFILTER_XT_MATCH_SOCKET -e NETFILTER_XT_MATCH_TCPMSS \
-            -e NETFILTER_XT_MATCH_HL -e NETFILTER_XT_MATCH_ESP \
-            -e NETFILTER_XT_MATCH_HELPER -e NETFILTER_XT_MATCH_POLICY \
-            -e NETFILTER_XT_MATCH_STATISTIC -e NETFILTER_XT_MATCH_STRING \
-            -e NETFILTER_XT_MATCH_TIME -e NETFILTER_XT_MATCH_U32 \
-            -e NETFILTER_XT_MATCH_DSCP -e NETFILTER_XT_MATCH_ECN \
-            -e NETFILTER_XT_MATCH_HASHLIMIT \
-            -e NETFILTER_XT_TARGET_MARK -e NETFILTER_XT_TARGET_NETMAP \
-            -e NETFILTER_XT_TARGET_CONNMARK -e NETFILTER_XT_TARGET_CT \
-            -e NETFILTER_XT_TARGET_HL -e NETFILTER_XT_TARGET_DSCP \
-            -e NETFILTER_XT_TARGET_CLASSIFY -e NETFILTER_XT_TARGET_IDLETIMER \
-            -e NETFILTER_XT_TARGET_TRACE
+            -e TMPFS_POSIX_ACL -e TMPFS_XATTR
 
           # ============================================
-          # 6. IPVS
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e IP_VS -e IP_VS_PROTO_TCP -e IP_VS_PROTO_UDP -e IP_VS_PROTO_SCTP \
-            -e IP_VS_PROTO_AH -e IP_VS_PROTO_ESP -e IP_VS_RR -e IP_VS_WRR \
-            -e IP_VS_LC -e IP_VS_WLC -e IP_VS_FO -e IP_VS_OVF \
-            -e IP_VS_LBLC -e IP_VS_LBLCR -e IP_VS_DH -e IP_VS_SH \
-            -e IP_VS_SED -e IP_VS_NQ -e IP_VS_NFCT
-
-          # ============================================
-          # 7. OverlayFS + 文件系统
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e OVERLAY_FS -e OVERLAY_FS_REDIRECT_DIR -e OVERLAY_FS_INDEX \
-            -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_LZ4 -e SQUASHFS_ZSTD \
-            -e EXT4_FS -e FUSE_FS -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
-            -e BLK_DEV_LOOP -e BLK_DEV_NBD -e DEVTMPFS -e DEVTMPFS_MOUNT
-
-          # ============================================
-          # 8. Netlink + Seccomp + BPF + TUN/TAP
-          # ============================================
-          ./scripts/config --file $CFG \
-            -e NETLINK_DIAG -e INET_DIAG -e PACKET_DIAG -e UNIX_DIAG \
-            -e SECCOMP -e SECCOMP_FILTER -e BPF_SYSCALL \
-            -e NET_SCHED -e NET_CLS_ACT -e NET_CLS_BPF -e NET_ACT_BPF \
-            -e TUN -e TAP -e NET_IPIP -e NET_IPGRE -e NET_IPGRE_DEMUX
-
-          # ============================================
-          # 9. 固件加载
+          # 固件加载
           # ============================================
           ./scripts/config --file $CFG \
             -e FW_LOADER -e FW_LOADER_USER_HELPER -e FW_LOADER_COMPRESS
+
+          # ============================================
+          # 网络隔离（Droidspaces NAT/无网络模式）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e VETH -e BRIDGE -e NETFILTER -e BRIDGE_NETFILTER \
+            -e NETFILTER_ADVANCED -e NF_CONNTRACK \
+            -e IP_NF_IPTABLES -e IP_NF_FILTER -e NF_NAT -e NF_TABLES \
+            -e IP_NF_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_MASQUERADE \
+            -e NETFILTER_XT_TARGET_TCPMSS -e NETFILTER_XT_MATCH_ADDRTYPE \
+            -e NF_CONNTRACK_NETLINK -e NF_NAT_REDIRECT \
+            -e IP_ADVANCED_ROUTER -e IP_MULTIPLE_TABLES
+
+          # ============================================
+          # 旧内核兼容（4.14 必需）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NF_CONNTRACK_IPV4 -e NF_NAT_IPV4 -e IP_NF_NAT
+
+          # ============================================
+          # 关键：禁用 ANDROID_PARANOID_NETWORK，否则容器内无法联网
+          # ============================================
+          ./scripts/config --file $CFG -d ANDROID_PARANOID_NETWORK
 
           # 自动处理依赖
           make O=out ARCH=arm64 SUBARCH=arm64 \
@@ -272,12 +253,16 @@ jobs:
             olddefconfig
 
           echo ""
-          echo "===== 关键配置检查 ====="
-          grep -E "CONFIG_(COMPAT|KUSER_HELPERS|COMPAT_VDSO)=" out/.config || true
+          echo "===== Droidspaces 必要配置检查 ====="
+          grep -E "CONFIG_(SYSCTL|SYSVIPC|POSIX_MQUEUE|NAMESPACES|PID_NS|UTS_NS|IPC_NS|NET_NS|USER_NS|SECCOMP|SECCOMP_FILTER|CGROUPS|CGROUP_DEVICE|CGROUP_PIDS|MEMCG|CGROUP_SCHED|FAIR_GROUP_SCHED|CGROUP_FREEZER|CGROUP_NET_PRIO|DEVTMPFS|OVERLAY_FS|TMPFS_POSIX_ACL|TMPFS_XATTR|FW_LOADER|FW_LOADER_USER_HELPER|FW_LOADER_COMPRESS|VETH|BRIDGE|NETFILTER|BRIDGE_NETFILTER|NETFILTER_ADVANCED|NF_CONNTRACK|IP_NF_IPTABLES|IP_NF_FILTER|NF_NAT|NF_TABLES|IP_NF_TARGET_MASQUERADE|NETFILTER_XT_TARGET_MASQUERADE|NETFILTER_XT_TARGET_TCPMSS|NETFILTER_XT_MATCH_ADDRTYPE|NF_CONNTRACK_NETLINK|NF_NAT_REDIRECT|IP_ADVANCED_ROUTER|IP_MULTIPLE_TABLES|NF_CONNTRACK_IPV4|NF_NAT_IPV4|IP_NF_NAT)=" out/.config || true
 
           echo ""
-          echo "===== Container config check ====="
-          grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|SYSVIPC|POSIX_MQUEUE|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS|DEVTMPFS|SQUASHFS|SECCOMP|BPF_SYSCALL)=" out/.config || true
+          echo "===== 关键禁用项检查 ====="
+          grep -E "CONFIG_ANDROID_PARANOID_NETWORK" out/.config || true
+
+          echo ""
+          echo "===== 32 位支持检查 ====="
+          grep -E "CONFIG_(COMPAT|COMPAT_32BIT_TIME|KUSER_HELPERS|COMPAT_VDSO)=" out/.config || true
 
       # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
       - name: Apply Droidspaces non-GKI patches
@@ -312,21 +297,18 @@ jobs:
             echo ""
             echo "----- 检查: $PATCH_NAME -----"
 
-            # 文件有效性检查
             if [ ! -s "$patch_file" ]; then
               echo "⚠ 补丁文件为空，跳过"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            # 检查是否是 HTML 错误页（下载失败）
             if head -c 100 "$patch_file" | grep -qi "<!DOCTYPE\|<html"; then
               echo "⚠ 补丁下载得到 HTML 页面（URL 失效），跳过"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            # dry-run：只有干净应用才真正应用
             if patch -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
               echo "✓ Dry-run 通过，正式应用..."
               patch -p1 < "$patch_file"
@@ -334,8 +316,6 @@ jobs:
               echo "✓ $PATCH_NAME 应用成功"
             else
               echo "⚠ Dry-run 失败（补丁上下文与本内核不匹配），跳过此补丁"
-              echo "   这是正常现象：Droidspaces 官方补丁针对特定内核版本，"
-              echo "   你的内核已被 LG/LineageOS 修改过，上下文可能不一致。"
               SKIPPED=$((SKIPPED + 1))
             fi
           done
@@ -344,8 +324,6 @@ jobs:
           echo "===== 补丁应用总结 ====="
           echo "已应用: $APPLIED 个"
           echo "已跳过: $SKIPPED 个"
-          echo ""
-          echo "===== 补丁步骤完成 ====="
 
       # ============ 9. 禁用 DTBO overlay 编译 ============
       - name: Disable DTBO overlay compilation
