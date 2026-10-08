@@ -1,0 +1,150 @@
+name: Build Container-Supported Kernel (LG V50) + BakaSU + AnyKernel3
+
+'on':
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "lineage-22.2"
+      defconfig_path:
+        description: "Path to defconfig (relative to kernel root)"
+        required: true
+        default: "vendor/lineageos_flash_defconfig"
+      bakasu_tag:
+        description: "BakaSU tag (留空则自动使用最新 tag)"
+        required: false
+        default: ""
+
+env:
+  KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
+  ARCH: arm64
+  SUBARCH: arm64
+  CCACHE_DIR: /home/runner/.cache/ccache-kernel
+  ZYC_CLANG_VERSION: "16.0.6-20260807"
+  BAKASU_REPO: "https://github.com/Baka-SU/BakaSU.git"
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch }}
+  DEFCONFIG_PATH: ${{ github.event.inputs.defconfig_path }}
+  BAKASU_TAG_INPUT: ${{ github.event.inputs.bakasu_tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      # ============ 1. 拉取本仓库 ============
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      # ============ 2. 拉取内核源码 ============
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_BRANCH }}
+          path: kernel
+          fetch-depth: 1
+
+      # ============ 3. 安装编译依赖 ============
+      - name: Install build dependencies
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/00-install-deps.sh"
+
+      # ============ 4. ccache 缓存 ============
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/ccache-kernel
+          key: ${{ runner.os }}-kernel-ccache-${{ env.KERNEL_BRANCH }}-${{ env.ZYC_CLANG_VERSION }}-bakasu-dwarf4-${{ hashFiles('kernel/Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-${{ env.KERNEL_BRANCH }}-${{ env.ZYC_CLANG_VERSION }}-bakasu-dwarf4-
+            ${{ runner.os }}-kernel-ccache-${{ env.KERNEL_BRANCH }}-${{ env.ZYC_CLANG_VERSION }}-
+            ${{ runner.os }}-kernel-ccache-${{ env.KERNEL_BRANCH }}-
+
+      - name: Setup ccache environment
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/01-setup-ccache.sh"
+
+      # ============ 5. 下载 zyc-clang 工具链 ============
+      - name: Setup zyc-clang toolchain
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/02-setup-zyc-clang.sh"
+
+      # ============ 6. 下载 GCC 4.9 工具链 ============
+      - name: Clone GCC 4.9 toolchains
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/03-setup-gcc.sh"
+
+      # ============ 7. 验证工具链 ============
+      - name: Verify toolchain
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/04-verify-toolchain.sh"
+
+      # ============ 8. 配置内核 ============
+      - name: Configure kernel
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/05-configure-kernel.sh"
+
+      # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
+      - name: Apply Droidspaces non-GKI patches
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/06-apply-droidspaces-patches.sh"
+
+      # ============ 8.6 集成 BakaSU 源码 ============
+      - name: Integrate BakaSU into kernel source
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/07-integrate-bakasu.sh"
+
+      # ============ 8.7 应用 BakaSU 手动钩子 ============
+      - name: Apply BakaSU manual hooks
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-bakasu-hooks.sh"
+
+      # ============ 8.8 启用 BakaSU 配置 ============
+      - name: Enable BakaSU config
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/09-enable-bakasu-config.sh"
+
+      # ============ 9. 禁用 DTBO overlay 编译 ============
+      - name: Disable DTBO overlay compilation
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/10-disable-dtbo.sh"
+
+      # ============ 10. 编译内核 ============
+      - name: Build kernel
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/11-build-kernel.sh"
+
+      # ============ 10.5 ccache 统计 ============
+      - name: Show ccache stats after build
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/12-show-ccache-stats.sh"
+
+      # ============ 11. 准备 AnyKernel3 ============
+      - name: Setup AnyKernel3
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/13-setup-anykernel3.sh"
+
+      # ============ 12. 放入新内核 / DTB / 模块 ============
+      - name: Copy kernel into AnyKernel3
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/14-copy-kernel.sh"
+
+      # ============ 13. 打包 AnyKernel3 zip ============
+      - name: Create AnyKernel3 zip
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/15-package-anykernel3.sh"
+
+      # ============ 14. 上传 AnyKernel3 zip ============
+      - name: Upload AnyKernel3 zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-flashlmdd-bakasu-anykernel-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-bakasu-*-anykernel-${{ github.run_number }}.zip
+          retention-days: 7
+
+      # ============ 15. 上传日志 ============
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 7
