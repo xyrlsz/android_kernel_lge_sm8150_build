@@ -18,9 +18,19 @@ sed -i 's/^do.cleanup=.*/do.cleanup=1/' anykernel.sh
 sed -i 's/^do.cleanuponabort=.*/do.cleanuponabort=0/' anykernel.sh
 sed -i 's/^device.name1=.*/device.name1=flashlmdd/' anykernel.sh
 sed -i 's/^device.name2=.*/device.name2=flashlmdd/' anykernel.sh
-sed -i 's|^block=.*|block=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
-sed -i 's/^is_slot_device=.*/is_slot_device=0;/' anykernel.sh
-sed -i 's/^ramdisk_compression=.*/ramdisk_compression=auto;/' anykernel.sh
+# anykernel.sh 里只有 properties() 的选项是小写（kernel.string / do.* / device.name*），
+# 顶层的 shell 变量是大写（BLOCK / IS_SLOT_DEVICE / RAMDISK_COMPRESSION），别写错大小写。
+# flashlmdd 是 A/B 设备，boot 分区实际叫 boot_a / boot_b，必须交给 AnyKernel3 自动补槽位后缀，
+# 否则会报 "Unable to determine boot partition. Aborting..." 而刷入失败。
+sed -i 's|^BLOCK=.*|BLOCK=boot;|' anykernel.sh
+sed -i 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=auto;/' anykernel.sh
+sed -i 's/^RAMDISK_COMPRESSION=.*/RAMDISK_COMPRESSION=auto;/' anykernel.sh
 
 echo "===== anykernel.sh 关键项 ====="
-grep -E 'kernel.string|do.devicecheck|do.modules|device.name1|block=|is_slot_device' anykernel.sh
+grep -E 'kernel.string|do.devicecheck|do.modules|device.name1|^BLOCK=|^IS_SLOT_DEVICE=|^RAMDISK_COMPRESSION=' anykernel.sh
+
+# 上面三条 sed 若因上游变量改名而失效，会被静默忽略并打出不可刷入的 zip，所以这里强制校验
+for key in 'BLOCK=boot;' 'IS_SLOT_DEVICE=auto;' 'RAMDISK_COMPRESSION=auto;' \
+           'device.name1=flashlmdd' 'do.modules=1' 'do.devicecheck=1'; do
+  grep -qF "$key" anykernel.sh || { echo "::error::anykernel.sh 未正确设置（$key）"; exit 1; }
+done
