@@ -1,189 +1,460 @@
-name: Build Container-Supported Kernel (LG G8)
+name: Build Container-Supported Kernel (LG V50) + AnyKernel3 Pack
 
 on:
-    workflow_dispatch:
-        inputs:
-            kernel_branch:
-                description: "Kernel branch to build"
-                required: true
-                default: "lineage-22.2"
-            defconfig_path:
-                description: "Path to defconfig (relative to kernel root)"
-                required: true
-                default: "vendor/lineageos_flash_defconfig"
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "lineage-22.2"
+      defconfig_path:
+        description: "Path to defconfig (relative to kernel root)"
+        required: true
+        default: "vendor/lineageos_flash_defconfig"
+
 env:
-    KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
-    ARCH: arm64
-    SUBARCH: arm64
-    CLANG_VERSION: "r510928" # lineage-22.2 (Android 15) 推荐版本
-    GCC64_VERSION: "master"
-    GCC32_VERSION: "master"
+  KERNEL_REPO: "LineageOS/android_kernel_lge_sm8150"
+  ARCH: arm64
+  SUBARCH: arm64
+  CCACHE_DIR: /home/runner/.cache/ccache-kernel
+  ZYC_CLANG_VERSION: "16.0.6-20260807"
 
 jobs:
-    build:
-        runs-on: ubuntu-22.04
-        timeout-minutes: 120
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
-        steps:
-            # ============ 1. 拉取内核源码 ============
-            - name: Checkout kernel source
-              uses: actions/checkout@v4
-              with:
-                  repository: ${{ env.KERNEL_REPO }}
-                  ref: ${{ github.event.inputs.kernel_branch }}
-                  path: kernel
-                  fetch-depth: 1
+    steps:
+      # ============ 1. 拉取本仓库 ============
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: builder
 
-            # ============ 2. 安装编译依赖 ============
-            - name: Install build dependencies
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    bc bison build-essential ccache curl flex git gnupg gperf \
-                    imagemagick lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
-                    libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
-                    libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-                    squashfs-tools xsltproc zip zlib1g-dev \
-                    python3 python-is-python3 libncurses5-dev libncursesw5-dev
-                  # Ubuntu 22.04 需要额外安装旧版 libncurses/libtinfo
-                  sudo apt-get install -y libncurses5 libtinfo5 || true
+      # ============ 2. 拉取内核源码 ============
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ github.event.inputs.kernel_branch }}
+          path: kernel
+          fetch-depth: 1
 
-            # ============ 3. ccache 缓存，加速二次编译 ============
-            - name: Setup ccache
-              uses: hendrikmuhs/ccache-action@v1.2
-              with:
-                  key: sm8150-${{ github.event.inputs.kernel_branch }}
-                  max-size: 2G
+      # ============ 3. 安装编译依赖 ============
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex gawk \
+            git gnupg gperf imagemagick libncurses-dev \
+            lib32readline-dev lib32z1-dev libdw-dev libelf-dev \
+            libgnutls28-dev liblz4-tool libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev unzip \
+            python3 python-is-python3 python3-pip \
+            libncurses5 libtinfo5
 
-            # ============ 4. 下载工具链 ============
-            - name: Clone toolchains
-              run: |
-                  # AOSP Clang
-                  git clone --depth=1 \
-                    https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-                    -b ${{ env.CLANG_VERSION }} /tmp/clang
-                  # AArch64 GCC 4.9
-                  git clone --depth=1 \
-                    https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-                    -b ${{ env.GCC64_VERSION }} /tmp/gcc64
-                  # ARM GCC 4.9
-                  git clone --depth=1 \
-                    https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
-                    -b ${{ env.GCC32_VERSION }} /tmp/gcc32
+          echo "===== ccache version ====="
+          ccache --version | head -1
 
-                  echo "/tmp/clang/bin"     >> $GITHUB_PATH
-                  echo "/tmp/gcc64/bin"     >> $GITHUB_PATH
-                  echo "/tmp/gcc32/bin"     >> $GITHUB_PATH
+      # ============ 4. ccache 缓存 ============
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/ccache-kernel
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-minimal-${{ hashFiles('kernel/Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-dwarf4-
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-${{ env.ZYC_CLANG_VERSION }}-
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.kernel_branch }}-
 
-            # ============ 5. 配置 + 注入容器支持 ============
-            - name: Configure kernel with container support
-              working-directory: ./kernel
-              run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-                  export CC=clang
-                  export CLANG_TRIPLE=aarch64-linux-gnu-
-                  export CROSS_COMPILE=aarch64-linux-android-
-                  export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+      - name: Setup ccache environment
+        shell: bash
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          {
+            echo "CCACHE_DIR=$CCACHE_DIR"
+            echo "CCACHE_MAXSIZE=5G"
+            echo "CCACHE_COMPRESS=true"
+            echo "CCACHE_COMPRESSLEVEL=6"
+            echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime"
+            echo "CCACHE_CPP2=true"
+            echo "CCACHE_DEPEND=true"
+          } >> $GITHUB_ENV
 
-                  # --- 5.1 生成基础 .config ---
-                  make O=out ARCH=arm64 SUBARCH=arm64 \
-                    ${{ github.event.inputs.defconfig_path }}
+      # ============ 5. 下载 zyc-clang 工具链 ============
+      - name: Setup zyc-clang toolchain
+        shell: bash
+        run: |
+          mkdir -p /home/runner/zyc-clang
+          cd /home/runner/zyc-clang
+          wget -q \
+            "https://github.com/ZyCromerZ/Clang/releases/download/${ZYC_CLANG_VERSION}-release/Clang-${ZYC_CLANG_VERSION}.tar.gz" \
+            -O zyc-clang.tar.gz
+          tar -zxf zyc-clang.tar.gz
+          rm zyc-clang.tar.gz
+          /home/runner/zyc-clang/bin/clang --version
+          echo "/home/runner/zyc-clang/bin" >> $GITHUB_PATH
 
-                  # --- 5.2 用 scripts/config 注入容器相关配置 ---
-                  # 注意：这里只使用 --enable，不删除任何已有配置，避免破坏 defconfig
-                  CFG="out/.config"
+      # ============ 6. 下载 GCC 4.9 工具链 ============
+      - name: Clone GCC 4.9 toolchains
+        shell: bash
+        run: |
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            /tmp/gcc64
+          echo "/tmp/gcc64/bin" >> $GITHUB_PATH
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+            /tmp/gcc32
+          echo "/tmp/gcc32/bin" >> $GITHUB_PATH
 
-                  # Namespaces（容器隔离的核心）
-                  ./scripts/config --file $CFG \
-                    -e NAMESPACES \
-                    -e NET_NS \
-                    -e PID_NS \
-                    -e IPC_NS \
-                    -e UTS_NS \
-                    -e USER_NS
+          cd /tmp/gcc64/bin
+          for f in aarch64-linux-android-4.9-*; do
+            [ -e "$f" ] || continue
+            ln -sf "$f" "${f/aarch64-linux-android-4.9-/aarch64-linux-android-}"
+          done
+          cd /tmp/gcc32/bin
+          for f in arm-linux-androideabi-4.9-*; do
+            [ -e "$f" ] || continue
+            ln -sf "$f" "${f/arm-linux-androideabi-4.9-/arm-linux-androideabi-}"
+          done
 
-                  # Control Groups（资源限制）
-                  ./scripts/config --file $CFG \
-                    -e CGROUPS \
-                    -e CGROUP_DEVICE \
-                    -e CGROUP_HUGETLB \
-                    -e NET_CLS_CGROUP \
-                    -e CGROUP_FREEZER \
-                    -e CGROUP_SCHED \
-                    -e CPUSETS \
-                    -e MEMCG
+      # ============ 7. 验证工具链 ============
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+          which clang
+          clang --version
+          which aarch64-linux-android-ld
+          which arm-linux-androideabi-ld
 
-                  # 网络相关（容器间通信）
-                  ./scripts/config --file $CFG \
-                    -e VETH \
-                    -e BRIDGE \
-                    -e BRIDGE_NETFILTER \
-                    -e NF_NAT \
-                    -e NETFILTER_XT_MATCH_ADDRTYPE \
-                    -e NETFILTER_XT_MATCH_CONNTRACK \
-                    -e NETFILTER_XT_MATCH_IPVS \
-                    -e NETFILTER_XT_MARK \
-                    -e NETFILTER_XT_NAT \
-                    -e NETFILTER_XT_TARGET_MASQUERADE \
-                    -e NETFILTER_XT_TARGET_REDIRECT \
-                    -e IP_VS
+      # ============ 8. 配置内核 ============
+      - name: Configure kernel
+        working-directory: ./kernel
+        run: |
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
-                  # OverlayFS（Docker overlay2 存储驱动）
-                  ./scripts/config --file $CFG -e OVERLAY_FS
+          make O=out ARCH=arm64 SUBARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            KCFLAGS="-gdwarf-4" \
+            ${{ github.event.inputs.defconfig_path }}
 
-                  # 部分配置项需要作为模块存在才能正确编译
-                  ./scripts/config --file $CFG \
-                    -m NETFILTER_XT_MATCH_ADDRTYPE \
-                    -m NETFILTER_XT_MATCH_CONNTRACK \
-                    -m NETFILTER_XT_MATCH_IPVS
+          CFG="out/.config"
 
-                  # --- 5.3 让 make 自动处理依赖关系 ---
-                  # olddefconfig 会用默认值填补未定义的依赖，避免交互式询问
-                  make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
+          # ============================================
+          # 32 位应用支持
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e COMPAT -e COMPAT_32BIT_TIME \
+            -e KUSER_HELPERS -e COMPAT_VDSO
 
-                  # --- 5.4 打印关键配置，验证是否生效 ---
-                  echo "===== Container-related config check ====="
-                  grep -E "CONFIG_(NAMESPACES|NET_NS|PID_NS|IPC_NS|UTS_NS|USER_NS|CGROUPS|CGROUP_DEVICE|MEMCG|VETH|BRIDGE|OVERLAY_FS|IP_VS)=" \
-                    out/.config || true
+          # ============================================
+          # IPC 机制
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e SYSCTL -e SYSVIPC -e POSIX_MQUEUE
 
-            # ============ 6. 编译内核 ============
-            - name: Build kernel
-              working-directory: ./kernel
-              run: |
-                  export PATH="/tmp/clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
-                  export CC=clang
-                  export CLANG_TRIPLE=aarch64-linux-gnu-
-                  export CROSS_COMPILE=aarch64-linux-android-
-                  export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          # ============================================
+          # 核心命名空间
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NAMESPACES -e PID_NS -e UTS_NS -e IPC_NS \
+            -e NET_NS -e USER_NS
 
-                  make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
-                    CC=clang \
-                    CLANG_TRIPLE=aarch64-linux-gnu- \
-                    CROSS_COMPILE=aarch64-linux-android- \
-                    CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          # ============================================
+          # Seccomp
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e SECCOMP -e SECCOMP_FILTER
 
-            # ============ 7. 打包成可刷入的 ZIP ============
-            - name: Package with AnyKernel3
-              run: |
-                  git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
-                  cd /tmp/AnyKernel3
+          # ============================================
+          # 控制组
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e CGROUPS -e CGROUP_DEVICE -e CGROUP_PIDS -e MEMCG \
+            -e CGROUP_SCHED -e FAIR_GROUP_SCHED -e CGROUP_FREEZER \
+            -e CGROUP_NET_PRIO
 
-                  # 拷贝内核产物
-                  cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz-dtb .
+          # ============================================
+          # 设备文件系统
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e DEVTMPFS
 
-                  # 可选：拷贝 dtbo，如果设备需要
-                  if [ -f ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img ]; then
-                    cp ${{ github.workspace }}/kernel/out/arch/arm64/boot/dtbo.img .
-                  fi
+          # ============================================
+          # Overlay 文件系统
+          # ============================================
+          ./scripts/config --file $CFG -e OVERLAY_FS
 
-                  # 清理并打包
-                  rm -rf .git
-                  zip -r9 kernel-flashlmdd-container.zip . -x "*.git*"
+          # ============================================
+          # tmpfs xattr / posix acl
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e TMPFS_POSIX_ACL -e TMPFS_XATTR
 
-            # ============ 8. 上传产物 ============
-            - name: Upload kernel package
-              uses: actions/upload-artifact@v4
-              with:
-                  name: kernel-flashlmdd-container-${{ github.run_number }}
-                  path: /tmp/AnyKernel3/kernel-flashlmdd-container.zip
-                  retention-days: 7
+          # ============================================
+          # 固件加载
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e FW_LOADER -e FW_LOADER_USER_HELPER -e FW_LOADER_COMPRESS
+
+          # ============================================
+          # 网络隔离（Droidspaces NAT/无网络模式）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e VETH -e BRIDGE -e NETFILTER -e BRIDGE_NETFILTER \
+            -e NETFILTER_ADVANCED -e NF_CONNTRACK \
+            -e IP_NF_IPTABLES -e IP_NF_FILTER -e NF_NAT -e NF_TABLES \
+            -e IP_NF_TARGET_MASQUERADE -e NETFILTER_XT_TARGET_MASQUERADE \
+            -e NETFILTER_XT_TARGET_TCPMSS -e NETFILTER_XT_MATCH_ADDRTYPE \
+            -e NF_CONNTRACK_NETLINK -e NF_NAT_REDIRECT \
+            -e IP_ADVANCED_ROUTER -e IP_MULTIPLE_TABLES
+
+          # ============================================
+          # 旧内核兼容（4.14 必需）
+          # ============================================
+          ./scripts/config --file $CFG \
+            -e NF_CONNTRACK_IPV4 -e NF_NAT_IPV4 -e IP_NF_NAT
+
+          # ============================================
+          # 关键：禁用 ANDROID_PARANOID_NETWORK，否则容器内无法联网
+          # ============================================
+          ./scripts/config --file $CFG -d ANDROID_PARANOID_NETWORK
+
+          # 自动处理依赖
+          make O=out ARCH=arm64 SUBARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            KCFLAGS="-gdwarf-4" \
+            olddefconfig
+
+          echo ""
+          echo "===== Droidspaces 必要配置检查 ====="
+          grep -E "CONFIG_(SYSCTL|SYSVIPC|POSIX_MQUEUE|NAMESPACES|PID_NS|UTS_NS|IPC_NS|NET_NS|USER_NS|SECCOMP|SECCOMP_FILTER|CGROUPS|CGROUP_DEVICE|CGROUP_PIDS|MEMCG|CGROUP_SCHED|FAIR_GROUP_SCHED|CGROUP_FREEZER|CGROUP_NET_PRIO|DEVTMPFS|OVERLAY_FS|TMPFS_POSIX_ACL|TMPFS_XATTR|FW_LOADER|FW_LOADER_USER_HELPER|FW_LOADER_COMPRESS|VETH|BRIDGE|NETFILTER|BRIDGE_NETFILTER|NETFILTER_ADVANCED|NF_CONNTRACK|IP_NF_IPTABLES|IP_NF_FILTER|NF_NAT|NF_TABLES|IP_NF_TARGET_MASQUERADE|NETFILTER_XT_TARGET_MASQUERADE|NETFILTER_XT_TARGET_TCPMSS|NETFILTER_XT_MATCH_ADDRTYPE|NF_CONNTRACK_NETLINK|NF_NAT_REDIRECT|IP_ADVANCED_ROUTER|IP_MULTIPLE_TABLES|NF_CONNTRACK_IPV4|NF_NAT_IPV4|IP_NF_NAT)=" out/.config || true
+
+          echo ""
+          echo "===== 关键禁用项检查 ====="
+          grep -E "CONFIG_ANDROID_PARANOID_NETWORK" out/.config || true
+
+          echo ""
+          echo "===== 32 位支持检查 ====="
+          grep -E "CONFIG_(COMPAT|COMPAT_32BIT_TIME|KUSER_HELPERS|COMPAT_VDSO)=" out/.config || true
+
+      # ============ 8.5 应用 Droidspaces non-GKI 补丁 ============
+      - name: Apply Droidspaces non-GKI patches
+        working-directory: ./kernel
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "===== 应用 Droidspaces non-GKI 补丁 ====="
+          echo "======================================"
+
+          PATCH_DIR="/tmp/droidspaces-patches"
+          mkdir -p "$PATCH_DIR"
+
+          echo "===== 下载补丁 ====="
+          curl -L --retry 3 --retry-delay 5 -o "$PATCH_DIR/01.fix_xt_qtaguid_panic.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch" || true
+          curl -L --retry 3 --retry-delay 5 -o "$PATCH_DIR/02.fix_cgroup_prefix.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" || true
+
+          echo "===== 下载结果 ====="
+          ls -la "$PATCH_DIR/"
+
+          echo ""
+          echo "===== 逐个应用补丁（dry-run 通过才应用）====="
+          APPLIED=0
+          SKIPPED=0
+
+          for patch_file in "$PATCH_DIR"/*.patch; do
+            [ -f "$patch_file" ] || continue
+
+            PATCH_NAME=$(basename "$patch_file")
+            echo ""
+            echo "----- 检查: $PATCH_NAME -----"
+
+            if [ ! -s "$patch_file" ]; then
+              echo "⚠ 补丁文件为空，跳过"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            if head -c 100 "$patch_file" | grep -qi "<!DOCTYPE\|<html"; then
+              echo "⚠ 补丁下载得到 HTML 页面（URL 失效），跳过"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            if patch -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
+              echo "✓ Dry-run 通过，正式应用..."
+              patch -p1 < "$patch_file"
+              APPLIED=$((APPLIED + 1))
+              echo "✓ $PATCH_NAME 应用成功"
+            else
+              echo "⚠ Dry-run 失败（补丁上下文与本内核不匹配），跳过此补丁"
+              SKIPPED=$((SKIPPED + 1))
+            fi
+          done
+
+          echo ""
+          echo "===== 补丁应用总结 ====="
+          echo "已应用: $APPLIED 个"
+          echo "已跳过: $SKIPPED 个"
+
+      # ============ 9. 禁用 DTBO overlay 编译 ============
+      - name: Disable DTBO overlay compilation
+        working-directory: ./kernel
+        run: |
+          find arch/arm64/boot/dts -name Makefile -print0 | \
+            xargs -0 -I{} sed -i 's/^dtbo-/dtbo-DISABLED-/g' {} || true
+          grep -rn "^dtbo-DISABLED-" arch/arm64/boot/dts/lge/Makefile | head -3 || true
+
+      # ============ 10. 编译内核 ============
+      - name: Build kernel
+        working-directory: ./kernel
+        run: |
+          export PATH="/home/runner/zyc-clang/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH"
+
+          echo "===== Build 开始 ====="
+          echo "时间: $(date)"
+          ccache -s
+
+          START_TIME=$(date +%s)
+
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            KCFLAGS="-gdwarf-4" \
+            2>&1 | tee build.log
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+
+          echo ""
+          echo "===== Build 结束 ====="
+          echo "耗时: ${DURATION} 秒 ($((DURATION/60)) 分钟)"
+          ccache -s
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== Build failed ====="
+            tail -100 build.log
+            exit 1
+          fi
+
+          ls -lh out/arch/arm64/boot/Image.gz || true
+          ls -lh out/arch/arm64/boot/dtb 2>/dev/null || true
+          ls -lh out/arch/arm64/boot/dtb.img 2>/dev/null || true
+          find out -name "*.ko" | head -30 || true
+          echo "模块总数: $(find out -name '*.ko' | wc -l)"
+
+      # ============ 10.5 ccache 统计 ============
+      - name: Show ccache stats after build
+        if: always()
+        run: |
+          echo "===== 最终 ccache 统计 ====="
+          ccache -s -v
+          echo ""
+          echo "===== 缓存目录大小 ====="
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "无法获取"
+
+      # ============ 11. 准备 AnyKernel3 ============
+      - name: Setup AnyKernel3
+        shell: bash
+        run: |
+          set -e
+          rm -rf /tmp/AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/AnyKernel3
+          cd /tmp/AnyKernel3
+
+          # 清理模板里的一些示例文件，防止误带
+          rm -f zImage Image.gz Image.lz4 Image.gz-dtb dtb dtbo.img 2>/dev/null || true
+
+          sed -i 's/^kernel.string=.*/kernel.string=Container Kernel for LG V50 (flashlmdd) by GitHub Actions/' anykernel.sh
+          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
+          sed -i 's/^do.modules=.*/do.modules=1/' anykernel.sh
+          sed -i 's/^do.systemless=.*/do.systemless=0/' anykernel.sh
+          sed -i 's/^do.cleanup=.*/do.cleanup=1/' anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=flashlmdd/' anykernel.sh
+          sed -i 's/^device.name2=.*/device.name2=flashlmdd/' anykernel.sh
+          sed -i 's|^block=.*|block=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
+          sed -i 's/^is_slot_device=.*/is_slot_device=0;/' anykernel.sh
+          sed -i 's/^ramdisk_compression=.*/ramdisk_compression=auto;/' anykernel.sh
+
+          echo "===== anykernel.sh 关键项 ====="
+          grep -E 'kernel.string|do.devicecheck|do.modules|do.systemless|device.name1|block=|is_slot_device|ramdisk_compression' anykernel.sh
+
+      # ============ 12. 放入新内核 / DTB / 模块 ============
+      - name: Copy kernel into AnyKernel3
+        shell: bash
+        working-directory: ./kernel
+        run: |
+          set -e
+          AK="/tmp/AnyKernel3"
+
+          if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "::error::Image.gz 未生成"
+            ls -la out/arch/arm64/boot/
+            exit 1
+          fi
+          cp out/arch/arm64/boot/Image.gz "$AK/Image.gz"
+
+          # 若内核导出了 boot 用 dtb，就带上；否则保留原 boot 的 dtb
+          if [ -f out/arch/arm64/boot/dtb ]; then
+            cp out/arch/arm64/boot/dtb "$AK/dtb"
+          elif [ -f out/arch/arm64/boot/dtb.img ]; then
+            cp out/arch/arm64/boot/dtb.img "$AK/dtb"
+          fi
+
+          # 内核模块：AnyKernel3 的 do.modules=1 会安装 modules/ 下的 .ko
+          rm -rf "$AK/modules"
+          mkdir -p "$AK/modules"
+          find out -name '*.ko' -exec cp -v {} "$AK/modules/" \;
+          echo "模块数量: $(find "$AK/modules" -name '*.ko' | wc -l)"
+
+          echo "===== AnyKernel3 内容 ====="
+          ls -lh "$AK/Image.gz"
+          [ -f "$AK/dtb" ] && ls -lh "$AK/dtb" || echo "未带 dtb（沿用原 boot）"
+          ls -lh "$AK/modules" | head -20
+
+      # ============ 13. 打包 AnyKernel3 zip ============
+      - name: Create AnyKernel3 zip
+        shell: bash
+        run: |
+          set -e
+          cd /tmp/AnyKernel3
+          ZIP="$GITHUB_WORKSPACE/boot-flashlmdd-container-anykernel-${{ github.run_number }}.zip"
+          rm -f "$ZIP"
+          zip -r9 "$ZIP" . -x ".git/*" "README.md" "*.zip"
+          ls -lh "$ZIP"
+          echo "===== zip 内容 ====="
+          unzip -l "$ZIP" | head -80
+
+      # ============ 14. 上传 AnyKernel3 zip ============
+      - name: Upload AnyKernel3 zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-flashlmdd-container-anykernel-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-container-anykernel-${{ github.run_number }}.zip
+          retention-days: 7
+
+      # ============ 15. 上传日志 ============
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/build.log
+          retention-days: 7
