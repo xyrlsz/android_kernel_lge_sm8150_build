@@ -30,7 +30,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 180
 
     steps:
       # ============ 1. 拉取本仓库 ============
@@ -92,50 +92,6 @@ jobs:
       - name: Integrate Baka-SU into kernel source
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/07-integrate-bakasu.sh"
-
-      # ============ 8.6.2 编译 Baka-SU 管理器 ============
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: "platforms;android-36 build-tools;36.1.0 ndk;30.0.16248370"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: kernel/KernelSU/manager
-
-      - name: Use available Android compile SDK
-        working-directory: ./kernel/KernelSU/manager
-        run: |
-          if grep -Fq 'extra["androidCompileSdkVersion"] = 37' build.gradle.kts; then
-            sed -i 's/extra\["androidCompileSdkVersion"\] = 37/extra["androidCompileSdkVersion"] = 36/' build.gradle.kts
-          elif ! grep -Fq 'extra["androidCompileSdkVersion"] = 36' build.gradle.kts; then
-            echo "::error::无法为 Baka-SU 管理器确认 Android compile SDK 版本"
-            exit 1
-          fi
-          grep -F 'extra["androidCompileSdkVersion"] = ' build.gradle.kts
-
-      - name: Build Baka-SU manager APK
-        working-directory: ./kernel/KernelSU/manager
-        run: |
-          BAKASU_COMMIT=$(cat /tmp/bakasu_commit.txt)
-          ./gradlew --no-daemon assembleDebug \
-            -Pcommit="$BAKASU_COMMIT" \
-            -PKSU_NAME=BakaSU
-
-      - name: Upload Baka-SU manager APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: bakasu-manager-${{ github.run_number }}
-          path: kernel/KernelSU/manager/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 7
 
       # ============ 8.6.5 应用 SUSFS 4.14 移植补丁 ============
       - name: Apply SUSFS 4.14 patch
