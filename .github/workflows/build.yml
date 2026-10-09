@@ -1,4 +1,4 @@
-name: Build Container-Supported Kernel (LG V50) + BakaSU + AnyKernel3
+name: Build Container-Supported Kernel (LG V50) + Baka-SU + SUSFS + AnyKernel3
 
 'on':
   workflow_dispatch:
@@ -12,7 +12,7 @@ name: Build Container-Supported Kernel (LG V50) + BakaSU + AnyKernel3
         required: true
         default: "vendor/lineageos_flash_defconfig"
       bakasu_tag:
-        description: "BakaSU tag (留空则自动使用最新 tag)"
+        description: "Baka-SU tag (留空则自动使用最新 tag)"
         required: false
         default: ""
 
@@ -88,18 +88,23 @@ jobs:
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/06-apply-droidspaces-patches.sh"
 
-      # ============ 8.6 集成 BakaSU 源码 ============
-      - name: Integrate BakaSU into kernel source
+      # ============ 8.6 集成 Baka-SU 源码 ============
+      - name: Integrate Baka-SU into kernel source
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/07-integrate-bakasu.sh"
 
-      # ============ 8.7 应用 BakaSU 手动钩子 ============
-      - name: Apply BakaSU manual hooks
+      # ============ 8.6.5 应用 SUSFS 4.14 移植补丁 ============
+      - name: Apply SUSFS 4.14 patch
+        working-directory: ./kernel
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-susfs-4.14-patch.sh"
+
+      # ============ 8.7 应用 Baka-SU 手动钩子 ============
+      - name: Apply Baka-SU manual hooks
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-bakasu-hooks.sh"
 
-      # ============ 8.8 启用 BakaSU 配置 ============
-      - name: Enable BakaSU config
+      # ============ 8.8 启用 Baka-SU + SUSFS 配置 ============
+      - name: Enable Baka-SU and SUSFS config
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/09-enable-bakasu-config.sh"
 
@@ -136,8 +141,8 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-flashlmdd-bakasu-anykernel-${{ github.run_number }}
-          path: ${{ github.workspace }}/boot-flashlmdd-bakasu-*-anykernel-${{ github.run_number }}.zip
+          name: boot-flashlmdd-bakasu-susfs-anykernel-${{ github.run_number }}
+          path: ${{ github.workspace }}/boot-flashlmdd-bakasu-susfs-*-anykernel-${{ github.run_number }}.zip
           retention-days: 7
 
       # ============ 15. 上传日志 ============

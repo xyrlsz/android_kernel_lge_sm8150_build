@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "=========================================="
-echo "===== 集成 BakaSU 内核源码 ====="
+echo "===== 集成 Baka-SU 内核源码 ====="
 echo "=========================================="
 
 INPUT_TAG="${BAKASU_TAG_INPUT:-}"
@@ -11,7 +11,7 @@ if [ -n "$INPUT_TAG" ]; then
   LATEST_TAG="$INPUT_TAG"
   echo "使用手动指定的 tag: $LATEST_TAG"
 else
-  echo "正在获取 BakaSU 最新 tag ..."
+  echo "正在获取 Baka-SU 最新 tag ..."
 
   RELEASE_TAG=$(curl -sL \
     "https://api.github.com/repos/Baka-SU/BakaSU/releases/latest" \
@@ -37,7 +37,7 @@ else
   fi
 fi
 
-echo "最终使用 BakaSU tag/ref: $LATEST_TAG"
+echo "最终使用 Baka-SU tag/ref: $LATEST_TAG"
 
 # ---- 按 tag 克隆 ----
 rm -rf KernelSU
@@ -46,8 +46,8 @@ git clone --depth=1 --branch "$LATEST_TAG" "$BAKASU_REPO" KernelSU
 cd KernelSU
 KSU_COMMIT=$(git rev-parse --short HEAD)
 KSU_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "$LATEST_TAG")
-echo "BakaSU tag: $KSU_TAG"
-echo "BakaSU commit: $KSU_COMMIT"
+echo "Baka-SU tag: $KSU_TAG"
+echo "Baka-SU commit: $KSU_COMMIT"
 cd ..
 
 # 保存版本信息，供后续步骤使用
@@ -76,4 +76,4 @@ else
   echo "✓ drivers/Kconfig 已包含 kernelsu"
 fi
 
-echo "===== BakaSU 源码集成完成 ====="
+echo "===== Baka-SU 源码集成完成 ====="

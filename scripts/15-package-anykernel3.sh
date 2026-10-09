@@ -5,7 +5,7 @@ cd /tmp/AnyKernel3
 
 BAKASU_VER=$(cat /tmp/bakasu_tag.txt 2>/dev/null || echo "unknown")
 
-ZIP="$GITHUB_WORKSPACE/boot-flashlmdd-bakasu-${BAKASU_VER}-anykernel-${GITHUB_RUN_NUMBER}.zip"
+ZIP="$GITHUB_WORKSPACE/boot-flashlmdd-bakasu-susfs-${BAKASU_VER}-anykernel-${GITHUB_RUN_NUMBER}.zip"
 rm -f "$ZIP"
 
 zip -r9 "$ZIP" . -x ".git/*" "README.md" "*.zip"

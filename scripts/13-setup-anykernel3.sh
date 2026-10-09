@@ -10,7 +10,7 @@ rm -f zImage Image.gz Image.lz4 Image.gz-dtb dtb dtbo.img 2>/dev/null || true
 
 BAKASU_VER=$(cat /tmp/bakasu_tag.txt 2>/dev/null || echo "unknown")
 
-sed -i "s/^kernel.string=.*/kernel.string=Container+BakaSU ${BAKASU_VER} Kernel for LG V50 (flashlmdd) by GitHub Actions/" anykernel.sh
+sed -i "s/^kernel.string=.*/kernel.string=Container+Baka-SU-SUSFS ${BAKASU_VER} Kernel for LG V50 (flashlmdd) by GitHub Actions/" anykernel.sh
 sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
 sed -i 's/^do.modules=.*/do.modules=1/' anykernel.sh
 sed -i 's/^do.systemless=.*/do.systemless=0/' anykernel.sh
