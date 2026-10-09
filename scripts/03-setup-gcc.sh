@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 64-bit GCC
+# 64-bit GCC for arm64 kernel builds
 git clone --depth=1 \
   https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
   /tmp/gcc64
 
 echo "/tmp/gcc64/bin" >> "$GITHUB_PATH"
 
-# 32-bit GCC
+# 32-bit compatibility toolchain for arm64 kernel's compat VDSO.
 git clone --depth=1 \
   https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
   /tmp/gcc32

@@ -70,8 +70,8 @@ jobs:
       - name: Setup zyc-clang toolchain
         run: bash "$GITHUB_WORKSPACE/builder/scripts/02-setup-zyc-clang.sh"
 
-      # ============ 6. 下载 GCC 4.9 工具链 ============
-      - name: Clone GCC 4.9 toolchains
+      # ============ 6. 下载 arm64 / 32 位兼容 GCC 4.9 工具链 ============
+      - name: Clone arm64 and compat GCC 4.9 toolchains
         run: bash "$GITHUB_WORKSPACE/builder/scripts/03-setup-gcc.sh"
 
       # ============ 7. 验证工具链 ============

@@ -15,7 +15,7 @@ make O=out ARCH=arm64 SUBARCH=arm64 \
 CFG="out/.config"
 
 # ============================================
-# 32 位应用支持
+# 保持 arm64 内核，同时启用 32 位 userspace 兼容支持
 # ============================================
 ./scripts/config --file "$CFG" \
   -e COMPAT -e COMPAT_32BIT_TIME \
@@ -106,5 +106,13 @@ grep -E "CONFIG_(SYSCTL|SYSVIPC|POSIX_MQUEUE|NAMESPACES|PID_NS|UTS_NS|IPC_NS|NET
 echo "===== ANDROID_PARANOID_NETWORK 检查 ====="
 grep -E "CONFIG_ANDROID_PARANOID_NETWORK" out/.config || true
 
-echo "===== 32 位支持检查 ====="
+echo "===== 32 位 userspace 兼容配置检查 ====="
 grep -E "CONFIG_(COMPAT|COMPAT_32BIT_TIME|KUSER_HELPERS|COMPAT_VDSO)=" out/.config || true
+if ! grep -q '^CONFIG_COMPAT=y$' out/.config; then
+  echo "::error::CONFIG_COMPAT 未启用；无法运行 32 位 userspace"
+  exit 1
+fi
+if ! grep -q '^CONFIG_COMPAT_32BIT_TIME=y$' out/.config; then
+  echo "::error::CONFIG_COMPAT_32BIT_TIME 未启用"
+  exit 1
+fi
