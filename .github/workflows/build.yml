@@ -12,7 +12,7 @@ name: Build Container-Supported Kernel (LG V50) + Baka-SU + SUSFS + AnyKernel3
         required: true
         default: "vendor/lineageos_flash_defconfig"
       bakasu_tag:
-        description: "Baka-SU tag (留空则自动使用最新 tag)"
+        description: "Baka-SU tag/ref (留空使用 main 分支最新提交)"
         required: false
         default: ""
 
@@ -30,7 +30,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       # ============ 1. 拉取本仓库 ============
@@ -93,18 +93,56 @@ jobs:
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/07-integrate-bakasu.sh"
 
+      # ============ 8.6.2 编译 Baka-SU 管理器 ============
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install manager Android SDK components
+        run: |
+          sdkmanager \
+            "platforms;android-37" \
+            "build-tools;36.1.0" \
+            "ndk;30.0.16248370"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: kernel/KernelSU/manager
+
+      - name: Build Baka-SU manager APK
+        working-directory: ./kernel/KernelSU/manager
+        run: |
+          BAKASU_COMMIT=$(cat /tmp/bakasu_commit.txt)
+          ./gradlew --no-daemon assembleDebug \
+            -Pcommit="$BAKASU_COMMIT" \
+            -PKSU_NAME=BakaSU
+
+      - name: Upload Baka-SU manager APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bakasu-manager-${{ github.run_number }}
+          path: kernel/KernelSU/manager/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
       # ============ 8.6.5 应用 SUSFS 4.14 移植补丁 ============
       - name: Apply SUSFS 4.14 patch
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-susfs-4.14-patch.sh"
 
-      # ============ 8.7 应用 Baka-SU 手动钩子 ============
-      - name: Apply Baka-SU manual hooks
+      # ============ 8.7 应用 SUSFS inline hooks ============
+      - name: Apply SUSFS inline hooks
         working-directory: ./kernel
-        run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-bakasu-hooks.sh"
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/08-apply-susfs-inline-hooks.sh"
 
-      # ============ 8.8 启用 Baka-SU + SUSFS 配置 ============
-      - name: Enable Baka-SU and SUSFS config
+      # ============ 8.8 启用 Baka-SU + SUSFS inline-hook 配置 ============
+      - name: Enable Baka-SU SUSFS inline-hook config
         working-directory: ./kernel
         run: bash "$GITHUB_WORKSPACE/builder/scripts/09-enable-bakasu-config.sh"
 
