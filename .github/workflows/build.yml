@@ -136,7 +136,12 @@ jobs:
       - name: Create AnyKernel3 zip
         run: bash "$GITHUB_WORKSPACE/builder/scripts/15-package-anykernel3.sh"
 
-      # ============ 14. 上传 AnyKernel3 zip ============
+      # ============ 14. 下载匹配 Baka-SU commit 的 Manager APK ============
+      - name: Download Baka-SU Manager APK for matching commit
+        id: manager
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/16-download-bakasu-manager.sh"
+
+      # ============ 15. 上传 AnyKernel3 zip ============
       - name: Upload AnyKernel3 zip
         if: success()
         uses: actions/upload-artifact@v4
@@ -145,7 +150,17 @@ jobs:
           path: ${{ github.workspace }}/boot-flashlmdd-bakasu-susfs-*-anykernel-${{ github.run_number }}.zip
           retention-days: 7
 
-      # ============ 15. 上传日志 ============
+      # ============ 16. 上传 Baka-SU Manager APK ============
+      - name: Upload Baka-SU Manager APK
+        if: success() && steps.manager.outputs.manager_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bakasu-manager-${{ github.run_number }}
+          path: ${{ github.workspace }}/bakasu-manager/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      # ============ 17. 上传日志 ============
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
