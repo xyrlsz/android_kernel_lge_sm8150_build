@@ -14,12 +14,29 @@ make O=out ARCH=arm64 SUBARCH=arm64 \
 
 CFG="out/.config"
 
+# COMPAT_32BIT_TIME is not available in every kernel version.
+if grep -Rq --include='Kconfig*' --exclude-dir=.git --exclude-dir=out \
+  -E '^[[:space:]]*config COMPAT_32BIT_TIME([[:space:]]|$)' .; then
+  COMPAT_32BIT_TIME_SUPPORTED=true
+else
+  kconfig_search_status=$?
+  if [ "$kconfig_search_status" -ne 1 ]; then
+    echo "::error::Failed to inspect kernel Kconfig sources" >&2
+    exit "$kconfig_search_status"
+  fi
+  COMPAT_32BIT_TIME_SUPPORTED=false
+  echo "::notice::Kernel Kconfig does not define COMPAT_32BIT_TIME; skipping that option"
+fi
+
 # ============================================
 # 保持 arm64 内核，同时启用 32 位 userspace 兼容支持
 # ============================================
 ./scripts/config --file "$CFG" \
-  -e COMPAT -e COMPAT_32BIT_TIME \
+  -e COMPAT \
   -e KUSER_HELPERS -e COMPAT_VDSO
+if [ "$COMPAT_32BIT_TIME_SUPPORTED" = true ]; then
+  ./scripts/config --file "$CFG" -e COMPAT_32BIT_TIME
+fi
 
 # ============================================
 # IPC 机制
@@ -112,7 +129,9 @@ if ! grep -q '^CONFIG_COMPAT=y$' out/.config; then
   echo "::error::CONFIG_COMPAT 未启用；无法运行 32 位 userspace"
   exit 1
 fi
-if ! grep -q '^CONFIG_COMPAT_32BIT_TIME=y$' out/.config; then
-  echo "::error::CONFIG_COMPAT_32BIT_TIME 未启用"
-  exit 1
+if [ "$COMPAT_32BIT_TIME_SUPPORTED" = true ]; then
+  if ! grep -q '^CONFIG_COMPAT_32BIT_TIME=y$' out/.config; then
+    echo "::error::CONFIG_COMPAT_32BIT_TIME 未启用"
+    exit 1
+  fi
 fi
