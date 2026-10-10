@@ -137,9 +137,12 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/builder/scripts/15-package-anykernel3.sh"
 
       # ============ 14. 下载匹配 Baka-SU commit 的 Manager APK ============
-      - name: Download Baka-SU Manager APK for matching commit
+      - name: Download Baka-SU Manager APK
         id: manager
+        continue-on-error: true
         run: bash "$GITHUB_WORKSPACE/builder/scripts/16-download-bakasu-manager.sh"
+        env:
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ============ 15. 上传 AnyKernel3 zip ============
       - name: Upload AnyKernel3 zip

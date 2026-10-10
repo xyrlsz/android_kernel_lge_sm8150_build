@@ -17,7 +17,14 @@ API_BASE="https://api.github.com/repos/Baka-SU/BakaSU"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# 下载 Actions 产物必须带认证（匿名请求会 401）；未提供 token 时仍按匿名方式请求
+CURL_AUTH=()
+if [ -n "${GH_API_TOKEN:-}" ]; then
+  CURL_AUTH=(-H "Authorization: Bearer $GH_API_TOKEN")
+fi
+
 if ! curl -fsSL --retry 3 --retry-delay 2 \
+  "${CURL_AUTH[@]}" \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   "$API_BASE/actions/workflows/build-manager.yml/runs?head_sha=$KSU_COMMIT&status=completed&per_page=100" \
@@ -36,6 +43,7 @@ if [ -z "$RUN_ID" ]; then
 fi
 
 if ! curl -fsSL --retry 3 --retry-delay 2 \
+  "${CURL_AUTH[@]}" \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   --get --data-urlencode "name=Manager-release" --data-urlencode "per_page=100" \
@@ -54,7 +62,9 @@ if [ -z "$ARTIFACT_ID" ]; then
   exit 0
 fi
 
+# -L 跳到 blob 存储时 curl 会自行丢弃 Authorization 头，不会把 token 发到第三方
 if ! curl -fLsS --retry 3 --retry-delay 2 \
+  "${CURL_AUTH[@]}" \
   "$API_BASE/actions/artifacts/$ARTIFACT_ID/zip" \
   -o "$TMP_DIR/manager.zip"; then
   echo "::error::Failed to download Manager-release artifact $ARTIFACT_ID"
